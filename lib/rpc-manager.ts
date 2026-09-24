@@ -17,6 +17,7 @@ import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trus
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { notifySessionComplete } from "./web-push";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
+import { attachOrSpawnAgent } from "./agent-remote";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
@@ -148,6 +149,15 @@ export function resolveSessionIdleTimeoutMs(
 }
 
 const SESSION_IDLE_TIMEOUT_MS = resolveSessionIdleTimeoutMs();
+
+/**
+ * Run each session's agent in its own process. Off by default: the in-process
+ * path is what everything above still assumes. See
+ * docs/adr/0006-agent-process-boundary.md.
+ */
+export function isAgentProcessEnabled(): boolean {
+  return process.env.PI_WEB_AGENT_PROCESS === "1";
+}
 
 const SESSION_REPLACEMENT_COMMAND_TYPES = new Set(["fork", "clone"]);
 const COMMANDS_ALLOWED_DURING_SESSION_REPLACEMENT = new Set([
@@ -1771,6 +1781,24 @@ export async function setRpcSessionTools(
     : validateSessionToolSelection(requestedToolNames);
   const existing = getRpcSession(sessionId);
 
+  if (isAgentProcessEnabled() && existing?.isAlive()) {
+    if (existing.isRunning()) throw new Error("Cannot change tools while the session is running");
+    const file = existing.sessionFile;
+    if (!file) throw new Error("Persisted session is missing a session file");
+    const manager = SessionManager.open(file, undefined);
+    if (readSubagentSessionResources(manager.getEntries() as unknown as SessionEntry[])) {
+      throw new Error("Subagent tool selection is fixed by its profile");
+    }
+    if (toolNames === undefined) appendClearedSessionToolSelection(manager);
+    else appendSessionToolSelection(manager, toolNames);
+    invalidateSessionListCache();
+    // The host reads the tool selection when it builds the session, so it has to
+    // be replaced rather than asked to change its mind.
+    await existing.shutdown();
+    const started = await startRpcSession(sessionId, file, undefined);
+    return { session: started.session, sessionId: started.realSessionId, recreated: true };
+  }
+
   if (!existing?.isAlive()) {
     if (!sessionFile) throw new Error("Session not found");
     const manager = SessionManager.open(sessionFile, undefined);
@@ -1947,6 +1975,39 @@ export function getCompletionNotificationSuppressedRpcSessionIds(): string[] {
  * thinking pin, and SDK scopedModels share one settings snapshot.
  * Pass options.toolNames to pre-configure active tools (empty = all disabled).
  */
+/**
+ * Spawn or adopt an agent host and register it under the same ids the in-process
+ * path uses, so `getRpcSession`, the command route, and the event stream do not
+ * need to know which side of the process boundary they are talking to.
+ *
+ * The remote session is registered as an `AgentSessionWrapper` because that is
+ * what the registry and its readers are typed for; `RemoteAgentSession` mirrors
+ * the members they use (see lib/agent-remote.ts). The one member it cannot
+ * mirror is `inner`, and the routes that need the SDK session already fall back
+ * to reading the session file when it is absent.
+ */
+async function startRemoteRpcSession(
+  sessionId: string,
+  sessionFile: string | null,
+  cwd: string | undefined,
+): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  const { session } = await attachOrSpawnAgent({
+    sessionId,
+    sessionFile,
+    cwd: cwd ?? process.cwd(),
+  });
+  const wrapper = session as unknown as AgentSessionWrapper;
+  // Two keys when the host generated its own id for a brand-new session: the
+  // caller asked for `sessionId`, the session answers to `session.sessionId`.
+  registerRpcWrapper(wrapper);
+  if (session.sessionId !== sessionId) {
+    const registry = getRegistry();
+    registry.set(sessionId, wrapper);
+    wrapper.onDestroy(() => registry.delete(sessionId));
+  }
+  return { session: wrapper, realSessionId: session.sessionId };
+}
+
 export async function startRpcSession(
   sessionId: string,
   sessionFile: string,
@@ -1965,6 +2026,15 @@ export async function startRpcSession(
 
   const inflight = locks.get(sessionId);
   if (inflight) return inflight;
+
+  if (isAgentProcessEnabled()) {
+    const startingRemote = startRemoteRpcSession(sessionId, sessionFile ?? null, cwd)
+      .finally(() => {
+        locks.delete(sessionId);
+      });
+    locks.set(sessionId, startingRemote);
+    return startingRemote;
+  }
 
   let sessionManager: SessionManager;
   if (sessionFile) {

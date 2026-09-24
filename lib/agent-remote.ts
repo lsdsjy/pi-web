@@ -3,8 +3,12 @@
  *
  * Spawns an agent host, or adopts one that outlived a previous server, and
  * speaks the NDJSON protocol in lib/agent-host-protocol.ts over a Unix socket.
- * Nothing here knows about Next.js; the routes keep their current contracts and
- * slice 2 swaps `lib/rpc-manager.ts` onto this client.
+ *
+ * `RemoteAgentSession` mirrors the parts of `AgentSessionWrapper` the app uses,
+ * so `lib/rpc-manager.ts` can hand either one to the routes. What it cannot
+ * mirror — `inner`, the in-process SDK session — is deliberately absent: routes
+ * that need the SDK session manager already fall back to reading the session
+ * file when `inner` is missing.
  */
 
 import { spawn, type ChildProcess } from "child_process";
@@ -26,7 +30,6 @@ import {
   readAgentRecord,
   removeAgentRecord,
   removeAgentSocket,
-  writeAgentRecord,
   AGENT_RECORD_VERSION,
   type AgentRecord,
 } from "./agent-registry";
@@ -49,15 +52,25 @@ interface PendingCommand {
   reject: (error: Error) => void;
 }
 
+interface RemoteState {
+  isStreaming?: boolean;
+  isBashRunning?: boolean;
+  isCompacting?: boolean;
+  isPromptRunning?: boolean;
+}
+
 /** A connection to one agent host. Closing it leaves the host running. */
 export class RemoteAgentSession {
   private socket: Socket;
   private readonly pending = new Map<string, PendingCommand>();
   private readonly listeners = new Set<AgentEventListener>();
+  private readonly destroyListeners = new Set<() => void>();
   private nextCommandId = 1;
   private closed = false;
   private alive = true;
-  /** Resolves when the host's first `snapshot` frame lands. */
+  private destroyed = false;
+  private running: boolean;
+  private streaming: unknown = null;
   private firstSnapshotResolve: (() => void) | null = null;
   private readonly firstSnapshot: Promise<void>;
 
@@ -68,11 +81,10 @@ export class RemoteAgentSession {
   readonly startedAt: number;
   /** Whether a turn or shell command was running when this client attached. */
   readonly runningOnAttach: boolean;
+  private readonly chatOnly: boolean;
+  private readonly suppressedNotifications: boolean;
   /** Latest `get_state` result, sent by the host right after `hello`. */
   state: unknown = null;
-  get isAlive(): boolean {
-    return this.alive && !this.closed && !this.socket.destroyed;
-  }
 
   private constructor(socket: Socket, hello: AgentHostHello) {
     this.socket = socket;
@@ -81,12 +93,15 @@ export class RemoteAgentSession {
     this.cwd = hello.cwd;
     this.startedAt = hello.startedAt;
     this.runningOnAttach = hello.running;
+    this.chatOnly = hello.chatOnly;
+    this.suppressedNotifications = hello.suppressedCompletionNotifications;
+    this.running = hello.running;
     this.firstSnapshot = new Promise<void>((resolve) => {
       this.firstSnapshotResolve = resolve;
     });
 
-    const read = createFrameReader<AgentHostFrame>((frame) => this.handleFrame(frame));
-    socket.on("data", read);
+    // The data reader lives in `attach`, which sees the `hello` frame first and
+    // keeps any bytes that arrived with it. See the note there.
     socket.on("close", () => this.handleDisconnect("connection closed"));
     socket.on("error", (error) => this.handleDisconnect(error.message));
   }
@@ -104,29 +119,38 @@ export class RemoteAgentSession {
         reject(new Error(`Agent host for ${record.sessionId} did not answer within ${timeoutMs}ms`));
       }, timeoutMs);
 
-      const readHello = createFrameReader<AgentHostFrame>((frame) => {
-        if (settled || frame.type !== "hello") return;
-        if (frame.protocol !== AGENT_HOST_PROTOCOL_VERSION) {
+      // One reader for the whole connection: the host writes `hello` and then
+      // its state snapshot immediately, and they can share a TCP chunk. A second
+      // reader installed after `hello` would start with an empty buffer and lose
+      // whatever arrived alongside it.
+      let session: RemoteAgentSession | null = null;
+      const read = createFrameReader<AgentHostFrame>((frame) => {
+        if (!session) {
+          if (settled || frame.type !== "hello") return;
+          if (frame.protocol !== AGENT_HOST_PROTOCOL_VERSION) {
+            settled = true;
+            clearTimeout(timer);
+            socket.destroy();
+            reject(new Error(`Agent host protocol ${frame.protocol} is not ${AGENT_HOST_PROTOCOL_VERSION}`));
+            return;
+          }
           settled = true;
           clearTimeout(timer);
-          socket.destroy();
-          reject(new Error(`Agent host protocol ${frame.protocol} is not ${AGENT_HOST_PROTOCOL_VERSION}`));
+          const attached = new RemoteAgentSession(socket, frame);
+          session = attached;
+          // Wait for the state snapshot so a caller that attached mid-turn has
+          // something to render immediately. A host that cannot answer yet must
+          // not hold the attach open.
+          void Promise.race([
+            attached.firstSnapshot,
+            new Promise<void>((resolve) => setTimeout(resolve, options.snapshotTimeoutMs ?? 1_500)),
+          ]).then(() => resolve(attached));
           return;
         }
-        settled = true;
-        clearTimeout(timer);
-        socket.off("data", readHello);
-        const session = new RemoteAgentSession(socket, frame);
-        // Wait for the state snapshot so a caller that attached mid-turn has
-        // something to render immediately. A host that cannot answer yet must
-        // not hold the attach open.
-        void Promise.race([
-          session.firstSnapshot,
-          new Promise<void>((resolve) => setTimeout(resolve, options.snapshotTimeoutMs ?? 5_000)),
-        ]).then(() => resolve(session));
+        session.handleFrame(frame);
       });
 
-      socket.on("data", readHello);
+      socket.on("data", read);
       socket.once("error", (error) => {
         if (settled) return;
         settled = true;
@@ -136,18 +160,83 @@ export class RemoteAgentSession {
     });
   }
 
+  // ---------------------------------------------------------------------------
+  // The AgentSessionWrapper surface the routes and the event stream rely on
+  // ---------------------------------------------------------------------------
+
+  isAlive(): boolean {
+    return this.alive && !this.closed && !this.socket.destroyed;
+  }
+
+  /**
+   * Advisory. Derived from the host's `hello`, its state snapshots, and turn
+   * events; the authoritative busy check runs inside the host's wrapper, which
+   * rejects the command on its own.
+   */
+  isRunning(): boolean {
+    return this.running;
+  }
+
+  get isStreaming(): boolean {
+    return Boolean((this.state as RemoteState | null)?.isStreaming) || this.streaming !== null;
+  }
+
+  get streamingMessage(): unknown {
+    return this.streaming;
+  }
+
+  isChatOnly(): boolean {
+    return this.chatOnly;
+  }
+
+  hasSuppressedCompletionNotifications(): boolean {
+    return this.suppressedNotifications;
+  }
+
+  /** The host already started the session. */
+  start(): void {}
+
+  /** The host already bound extensions; see `waitUntilReady`. */
+  beginExtensionBinding(): void {}
+
+  /** Resolves once the host's state snapshot has arrived, or immediately if it never does. */
+  waitUntilReady(): Promise<void> {
+    return Promise.race([
+      this.firstSnapshot,
+      new Promise<void>((resolve) => setTimeout(resolve, 1_500)),
+    ]);
+  }
+
+  /** Whether the on-disk session file has entries this connection has not seen. */
+  evictIfDiskAhead(): boolean {
+    return false;
+  }
+
+  setActiveToolSelection(toolNames: string[]): void {
+    void this.send({ type: "set_tool_selection", toolNames }).catch(() => {
+      // The next `set_tools` recreates the session from the file anyway.
+    });
+  }
+
   onEvent(listener: AgentEventListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
 
-  private handleFrame(frame: AgentHostFrame): void {
+  onDestroy(callback: () => void): void {
+    this.destroyListeners.add(callback);
+  }
+
+  /** Called by the connection's frame reader. */
+  handleFrame(frame: AgentHostFrame): void {
     if (frame.type === "event") {
+      this.trackEvent(frame.event);
       for (const listener of this.listeners) listener(frame.event);
       return;
     }
     if (frame.type === "snapshot") {
       this.state = frame.state;
+      this.running = isRunningState(frame.state);
       this.firstSnapshotResolve?.();
       this.firstSnapshotResolve = null;
       return;
@@ -161,6 +250,27 @@ export class RemoteAgentSession {
     }
   }
 
+  /** Keep `isRunning` and `streamingMessage` roughly current between snapshots. */
+  private trackEvent(event: { type: string; [key: string]: unknown }): void {
+    switch (event.type) {
+      case "message_update":
+      case "agent_start":
+      case "prompt_accepted":
+        this.running = true;
+        break;
+      case "agent_settled":
+      case "session_shutdown":
+        this.running = false;
+        this.streaming = null;
+        break;
+      default:
+        break;
+    }
+    if (event.type === "message_update") {
+      this.streaming = event.message ?? null;
+    }
+  }
+
   private handleDisconnect(reason: string): void {
     if (this.alive) {
       this.alive = false;
@@ -170,11 +280,25 @@ export class RemoteAgentSession {
       pending.reject(new Error(`Agent host disconnected: ${reason}`));
     }
     this.pending.clear();
+    this.fireDestroy();
+  }
+
+  private fireDestroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    for (const callback of this.destroyListeners) {
+      try {
+        callback();
+      } catch (error) {
+        console.error("[pi-web] agent session destroy listener failed:", error);
+      }
+    }
+    this.destroyListeners.clear();
   }
 
   /** Send one command and await its answer. */
   send(command: Record<string, unknown>): Promise<unknown> {
-    if (!this.isAlive) return Promise.reject(new Error("Agent host is not connected"));
+    if (!this.isAlive()) return Promise.reject(new Error("Agent host is not connected"));
     const id = String(this.nextCommandId++);
     const frame: AgentHostClientFrame = { type: "command", id, command };
     return new Promise((resolve, reject) => {
@@ -187,6 +311,29 @@ export class RemoteAgentSession {
     });
   }
 
+  /** Ask the host to end the session; the host then exits. */
+  async shutdown(): Promise<void> {
+    try {
+      await this.send({ type: "shutdown" });
+    } catch {
+      // The host may already be gone; closing the socket is enough.
+    }
+    this.close();
+    this.fireDestroy();
+  }
+
+  /**
+   * Local teardown, matching the wrapper's `destroy()`. The session lives in
+   * another process now, so this only drops the connection — `shutdown()` is
+   * what ends the session. The distinction matters on process exit: pi-web tears
+   * every session down through this path, and a remote host must keep running
+   * through it.
+   */
+  destroy(): void {
+    this.close();
+    this.fireDestroy();
+  }
+
   /** Detach. The host and its session keep running. */
   close(): void {
     if (this.closed) return;
@@ -194,6 +341,12 @@ export class RemoteAgentSession {
     this.listeners.clear();
     this.socket.destroy();
   }
+}
+
+function isRunningState(state: unknown): boolean {
+  if (!state || typeof state !== "object") return false;
+  const value = state as RemoteState;
+  return Boolean(value.isStreaming || value.isBashRunning || value.isCompacting || value.isPromptRunning);
 }
 
 function hostEntryPath(): string {
@@ -236,7 +389,9 @@ export function spawnAgentHost(options: {
     child = spawn(process.execPath, args, {
       detached: true,
       stdio: ["ignore", logFd, logFd],
-      env: process.env,
+      // The host runs the in-process path itself; inheriting the flag would make
+      // it spawn a host of its own.
+      env: { ...process.env, PI_WEB_AGENT_PROCESS: "0" },
     });
   } finally {
     closeSync(logFd);
@@ -309,8 +464,5 @@ export async function attachOrSpawnAgent(options: {
     startedAt: Date.now(),
   };
   const session = await RemoteAgentSession.attach(record);
-  // The host writes its own record with its real session id; this one covers the
-  // window before it does, and matches the record for an adopted host.
-  writeAgentRecord({ ...record, sessionId: session.sessionId, sessionFile: session.sessionFile });
-  return { session, adopted: false, record };
+  return { session, adopted: false, record: { ...record, sessionId: session.sessionId } };
 }

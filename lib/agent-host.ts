@@ -75,7 +75,24 @@ export async function runAgentHost(options: AgentHostOptions): Promise<AgentHost
 
   const handleCommand = async (socket: Socket, frame: Extract<AgentHostClientFrame, { type: "command" }>): Promise<void> => {
     try {
-      const data = await session.send(frame.command);
+      let data: unknown;
+      if (frame.command.type === "shutdown") {
+        // Answer first: the session teardown closes this socket.
+        send(socket, { type: "response", id: frame.id, success: true, data: null });
+        void session.shutdown().catch(() => {});
+        return;
+      }
+      if (frame.command.type === "set_tool_selection") {
+        // A wrapper method, not a command: answer it here instead of forwarding.
+        const toolNames = frame.command.toolNames;
+        if (!Array.isArray(toolNames) || toolNames.some((name) => typeof name !== "string")) {
+          throw new Error("toolNames must be an array of strings");
+        }
+        session.setActiveToolSelection(toolNames as string[]);
+        data = null;
+      } else {
+        data = await session.send(frame.command);
+      }
       send(socket, { type: "response", id: frame.id, success: true, data });
     } catch (error) {
       send(socket, {
@@ -102,6 +119,8 @@ export async function runAgentHost(options: AgentHostOptions): Promise<AgentHost
       sessionFile: session.sessionFile ?? null,
       cwd: session.cwd,
       running: session.isRunning(),
+      chatOnly: session.isChatOnly(),
+      suppressedCompletionNotifications: session.hasSuppressedCompletionNotifications(),
       startedAt,
     });
     void session.send({ type: "get_state" })
@@ -145,9 +164,10 @@ export async function runAgentHost(options: AgentHostOptions): Promise<AgentHost
   for (const id of recordIds) writeAgentRecord({ ...record, sessionId: id });
 
   let closed = false;
-  const close = async (): Promise<void> => {
+  const close = async (reason: string): Promise<void> => {
     if (closed) return;
     closed = true;
+    console.error(`[pi-web agent-host] closing (${reason})`);
     unsubscribe();
     for (const id of recordIds) removeAgentRecord(id);
     for (const client of clients) client.destroy();
@@ -159,16 +179,18 @@ export async function runAgentHost(options: AgentHostOptions): Promise<AgentHost
   // The session wrapper tears itself down when it goes idle or a client asks it
   // to; the host follows it out so no process outlives its session.
   session.onDestroy(() => {
-    void close().finally(() => process.exit(0));
+    void close("session destroyed").finally(() => process.exit(0));
   });
 
-  const stop = (): void => {
+  const stop = (signal: string): void => {
+    console.error(`[pi-web agent-host] stopping on ${signal}`);
     void session.shutdown()
       .catch(() => {})
-      .finally(() => close().finally(() => process.exit(0)));
+      .finally(() => close(`signal ${signal}`).finally(() => process.exit(0)));
   };
-  process.once("SIGTERM", stop);
-  process.once("SIGINT", stop);
+  process.once("SIGTERM", () => stop("SIGTERM"));
+  process.once("SIGINT", () => stop("SIGINT"));
+  process.once("SIGHUP", () => stop("SIGHUP"));
 
-  return { session, socketPath, close };
+  return { session, socketPath, close: () => close("requested by caller") };
 }

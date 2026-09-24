@@ -21,6 +21,10 @@ export interface AgentHostHello {
   cwd: string;
   /** Whether a turn or a shell command was still running when the client attached. */
   running: boolean;
+  /** Resource policy of the session, so the client can answer without a round trip. */
+  chatOnly: boolean;
+  /** Whether completion notifications are muted for this session. */
+  suppressedCompletionNotifications: boolean;
   startedAt: number;
 }
 
@@ -60,6 +64,12 @@ export interface AgentHostCommand {
   id: string;
   command: Record<string, unknown>;
 }
+
+/**
+ * Commands the host answers itself instead of forwarding to the session, because
+ * they are method calls on the wrapper rather than entries in its command switch.
+ */
+export const AGENT_HOST_LOCAL_COMMANDS = ["set_tool_selection"] as const;
 
 export type AgentHostClientFrame = AgentHostCommand;
 
