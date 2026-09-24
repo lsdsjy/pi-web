@@ -781,7 +781,9 @@ function AssistantMessageView({
 
               {est > 0 && (
                 <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title={t("i18n.estimatedTokens")}>
-                  <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
+                  {/* Tabular figures: the count ticks every chunk, and proportional
+                      digits make the row (and the t/s badge next to it) jitter. */}
+                  <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400, fontVariantNumeric: "tabular-nums" }}>
                     <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
                     </svg>
@@ -790,7 +792,7 @@ function AssistantMessageView({
                   {tps !== null && (() => {
                     const bg = tps >= 50 ? "#53b3cb" : tps >= 30 ? "#9bc53d" : tps >= 15 ? "#f9c22e" : "#e01a4f";
                     return (
-                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: bg, color: "#fff", fontSize: 11, fontWeight: 400 }}>
+                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: bg, color: "#fff", fontSize: 11, fontWeight: 400, fontVariantNumeric: "tabular-nums" }}>
                         {tps.toFixed(1)} t/s
                       </span>
                     );
