@@ -8,20 +8,36 @@ import {
   normalizeDisplayMath,
 } from "@/lib/markdown";
 import { isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import type { SessionOutline, OutlineTurn } from "@/lib/session-outline";
 import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
 import { useI18n } from "@/hooks/useI18n";
 import styles from "./ChatMinimap.module.css";
 
 interface Props {
   messages: AgentMessage[];
+  /** Entry id per message, index-aligned with `messages`. */
+  entryIds: (string | null)[];
   streamingMessage: Partial<AgentMessage> | null;
   scrollContainer: RefObject<HTMLDivElement | null>;
   messageRefs: RefObject<(HTMLDivElement | null)[]>;
+  /**
+   * Every turn on the active branch, loaded or not. Loaded turns are matched to
+   * it by entry id, so the rail covers the whole session instead of only the
+   * page the chat has fetched. Null while it is still being fetched.
+   */
+  outline: SessionOutline | null;
   onRevealHistory: () => void;
+  /** Load and scroll to a turn whose entry is not in memory yet. */
+  onJumpToEntry: (entryId: string) => void;
 }
 
 const MINIMAP_WIDTH = 36;
 const MAX_NODE_GAP = 50;
+/**
+ * Smallest spacing two turn dots may have. Below this the rail would render as
+ * one solid bar, so `layoutNodes` samples evenly instead of packing every turn.
+ */
+const MIN_NODE_GAP = 9;
 const MINIMAP_PADDING = 12;
 const PREVIEW_HIDE_DELAY = 250;
 const NAVIGATION_ACTIVE_LOCK_MS = 1600;
@@ -32,7 +48,10 @@ interface AssistantPreview {
 }
 
 interface TurnInfo {
-  userMessage: UserMessage | CustomMessage;
+  /** Anchor entry id, or null for a turn that has no persisted entry yet. */
+  entryId: string | null;
+  /** User prompt preview, or a label for a compaction / subagent anchor. */
+  preview: string;
   assistantPreviews: AssistantPreview[];
   scrollTop: number | null;
   /** Tool calls issued anywhere in this turn's assistant replies. */
@@ -206,6 +225,41 @@ function createTurnNodes(turns: TurnInfo[]): NodeInfo[] {
   }));
 }
 
+/**
+ * Order the rail by the full outline, borrowing scroll positions and answer
+ * previews from the turns that are mounted.
+ *
+ * Turns the outline does not carry are appended: the loaded window is always the
+ * newest slice of the branch, so anything measured but missing from the outline
+ * (a prompt sent after the outline was fetched) belongs at the end.
+ */
+function mergeOutlineTurns(outline: SessionOutline | null, measured: TurnInfo[]): TurnInfo[] {
+  if (!outline || outline.turns.length === 0) return measured;
+
+  const measuredByEntry = new Map<string, TurnInfo>();
+  for (const turn of measured) {
+    if (turn.entryId) measuredByEntry.set(turn.entryId, turn);
+  }
+
+  const covered = new Set<string>();
+  const merged = outline.turns.map((turn: OutlineTurn): TurnInfo => {
+    covered.add(turn.entryId);
+    return measuredByEntry.get(turn.entryId) ?? {
+      entryId: turn.entryId,
+      preview: turn.preview,
+      assistantPreviews: [],
+      scrollTop: null,
+      toolCount: turn.toolCount,
+    };
+  });
+
+  for (const turn of measured) {
+    if (turn.entryId && covered.has(turn.entryId)) continue;
+    merged.push(turn);
+  }
+  return merged;
+}
+
 interface NodeLayout {
   nodes: NodeInfo[];
   gap: number;
@@ -219,18 +273,30 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
 
   const height = Math.max(1, minimapHeight);
   const usableHeight = Math.max(0, height - MINIMAP_PADDING * 2);
-  if (allNodes.length === 1) {
+
+  // A session can carry thousands of turns. Rather than letting the dots
+  // overlap into a solid bar, keep an even sample that fits at MIN_NODE_GAP and
+  // always retains the first and last turn so the rail still spans the whole
+  // conversation.
+  const maxNodes = Math.max(1, Math.floor(usableHeight / MIN_NODE_GAP) + 1);
+  const nodes = allNodes.length > maxNodes
+    ? Array.from({ length: maxNodes }, (_, index) => (
+      allNodes[Math.round((index * (allNodes.length - 1)) / (maxNodes - 1))]
+    ))
+    : allNodes;
+
+  if (nodes.length === 1) {
     return {
-      nodes: [{ ...allNodes[0], topRatio: MINIMAP_PADDING / height }],
+      nodes: [{ ...nodes[0], topRatio: MINIMAP_PADDING / height }],
       gap: MAX_NODE_GAP,
       fillsHeight: false,
     };
   }
 
-  const naturalGap = usableHeight / (allNodes.length - 1);
+  const naturalGap = usableHeight / (nodes.length - 1);
   const gap = Math.min(MAX_NODE_GAP, naturalGap);
   return {
-    nodes: allNodes.map((node, index) => ({
+    nodes: nodes.map((node, index) => ({
       ...node,
       topRatio: (MINIMAP_PADDING + index * gap) / height,
     })),
@@ -241,10 +307,13 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
 
 export function ChatMinimap({
   messages,
+  entryIds,
   streamingMessage,
   scrollContainer,
   messageRefs,
+  outline,
   onRevealHistory,
+  onJumpToEntry,
 }: Props) {
   const { t } = useI18n();
   const [visible, setVisible] = useState(false);
@@ -278,6 +347,10 @@ export function ChatMinimap({
   );
   const allMessagesRef = useRef(allMessages);
   allMessagesRef.current = allMessages;
+  const entryIdsRef = useRef(entryIds);
+  entryIdsRef.current = entryIds;
+  const outlineRef = useRef(outline);
+  outlineRef.current = outline;
 
   const nodeLayout = useMemo(
     () => layoutNodes(allNodes, minimapHeight),
@@ -336,22 +409,25 @@ export function ChatMinimap({
       if (!scrollEl || !minimapEl) return;
 
       const refs = messageRefs.current;
+      const allEntryIds = entryIdsRef.current;
       const containerRect = scrollEl.getBoundingClientRect();
       const turns: TurnInfo[] = [];
       let refIndex = 0;
       let currentTurn: TurnInfo | null = null;
 
-      for (const message of allMessagesRef.current) {
+      const loadedMessages = allMessagesRef.current;
+      for (let messageIndex = 0; messageIndex < loadedMessages.length; messageIndex += 1) {
+        const message = loadedMessages[messageIndex];
         const isAnchor = isMessageGroupAnchor(message);
         if (!isAnchor && message.role !== "assistant") continue;
         const element = refs?.[refIndex];
         refIndex++;
 
         if (isAnchor) {
-          currentTurn = null;
           const elementRect = element?.getBoundingClientRect();
           currentTurn = {
-            userMessage: message as UserMessage | CustomMessage,
+            entryId: allEntryIds[messageIndex] ?? null,
+            preview: getUserPreview(message as UserMessage | CustomMessage),
             assistantPreviews: [],
             scrollTop: elementRect
               ? elementRect.top - containerRect.top + scrollEl.scrollTop
@@ -373,7 +449,7 @@ export function ChatMinimap({
         }
       }
 
-      const nextNodes = createTurnNodes(turns);
+      const nextNodes = createTurnNodes(mergeOutlineTurns(outlineRef.current, turns));
       setMinimapHeight(minimapEl.clientHeight);
       allNodesRef.current = nextNodes;
       setAllNodes(nextNodes);
@@ -449,13 +525,23 @@ export function ChatMinimap({
       updateScroll();
     }, 50);
     return () => clearTimeout(timeout);
-  }, [messages.length, measureNodes, updateScroll]);
+    // `outline` matters as much as `messages.length`: it arrives from its own
+    // request, and until this runs the rail still holds the nodes from the
+    // loaded page alone.
+  }, [messages.length, outline, measureNodes, updateScroll]);
 
   const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
     lockActiveNode(node.index);
     if (node.targetTurn.scrollTop === null) {
+      // The turn has no element because its entries were never fetched. Hand the
+      // entry id back so the chat can page down to it; a turn that is merely
+      // scrolled out of the window still works, because it keeps its entry id.
+      if (node.targetTurn.entryId) {
+        onJumpToEntry(node.targetTurn.entryId);
+        return;
+      }
       pendingNavigationRef.current = { nodeIndex: node.index, target: "user" };
       onRevealHistory();
       return;
@@ -465,7 +551,7 @@ export function ChatMinimap({
       node.targetTurn.scrollTop - scrollEl.clientHeight * 0.3,
     );
     scrollEl.scrollTo({ top: targetTop, behavior });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
+  }, [lockActiveNode, onJumpToEntry, onRevealHistory, scrollContainer]);
 
   const scrollToAssistant = useCallback((node: NodeInfo, assistantIndex: number) => {
     const scrollEl = scrollContainer.current;
@@ -697,7 +783,7 @@ export function ChatMinimap({
           onMouseDown={(event) => event.stopPropagation()}
           onMouseMove={(event) => event.stopPropagation()}
         >
-          {allNodes.map((node) => {
+          {positionedNodes.map((node) => {
             const isLocated = nearestNodeIndex === node.index;
             return (
               <div
@@ -735,7 +821,7 @@ export function ChatMinimap({
                     }}
                   >
                     <span className={styles.userText}>
-                      {getUserPreview(node.targetTurn.userMessage)}
+                      {node.targetTurn.preview}
                     </span>
                   </button>
 
