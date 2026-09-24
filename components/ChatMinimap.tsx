@@ -400,6 +400,11 @@ export function ChatMinimap({
   }, [scrollContainer, syncActiveNode]);
 
   const measureThrottleRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Coalesced measurement. Bursts of calls inside the throttle window collapse
+   * into one pass; a call that lands while one is pending is dropped rather than
+   * queued.
+   */
   const measureNodes = useCallback(() => {
     if (measureThrottleRef.current) return;
     measureThrottleRef.current = setTimeout(() => {
@@ -525,10 +530,20 @@ export function ChatMinimap({
       updateScroll();
     }, 50);
     return () => clearTimeout(timeout);
-    // `outline` matters as much as `messages.length`: it arrives from its own
-    // request, and until this runs the rail still holds the nodes from the
-    // loaded page alone.
-  }, [messages.length, outline, measureNodes, updateScroll]);
+  }, [messages.length, measureNodes, updateScroll]);
+
+  useEffect(() => {
+    if (!outline) return;
+    // The outline arrives on its own request, after the first measurement, and
+    // it changes which turns the rail holds. Cancel the coalesced pass so this
+    // one is not swallowed by the throttle.
+    if (measureThrottleRef.current) {
+      clearTimeout(measureThrottleRef.current);
+      measureThrottleRef.current = null;
+    }
+    measureNodes();
+    updateScroll();
+  }, [outline, measureNodes, updateScroll]);
 
   const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior) => {
     const scrollEl = scrollContainer.current;
