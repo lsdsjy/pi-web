@@ -1,6 +1,14 @@
 export const VISIBLE_PAGE_SIZE = 50;
 export const CHAT_SCROLL_TAIL_TOLERANCE = 8;
 export const CHAT_SCROLL_REATTACH_TOLERANCE = 96;
+/**
+ * Page size used when the minimap jumps to a turn that is not loaded yet.
+ * Larger than VISIBLE_PAGE_SIZE because a jump is a deliberate seek, and the
+ * context API caps `tail` at 1000 anyway.
+ */
+export const CHAT_JUMP_PAGE_SIZE = 400;
+/** Upper bound on pages one jump may fetch, so a deep seek cannot spin forever. */
+export const CHAT_JUMP_MAX_PAGES = 8;
 
 export function getVisibleRenderWindow(totalCount: number, visibleCount: number): {
   startIndex: number;

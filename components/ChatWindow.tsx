@@ -13,6 +13,7 @@ import { MessageView } from "./MessageView";
 import { MarkdownBody } from "./MarkdownBody";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
+import type { SessionOutline } from "@/lib/session-outline";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
 import { useI18n } from "@/hooks/useI18n";
@@ -26,6 +27,8 @@ import type { ToolEntry } from "@/lib/tool-presets";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollDistance,
+  CHAT_JUMP_MAX_PAGES,
+  CHAT_JUMP_PAGE_SIZE,
   getPromptAnchorSpacerHeight,
   getVisibleRenderWindow,
   isScrollAtTail,
@@ -747,9 +750,99 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     return history.reverse();
   }, [messages]);
   const messageRefs = useMessageRefs(visibleMessages.length);
+
   const revealHistoryForMinimap = useCallback(() => {
     setVisibleCount((current) => Math.max(current, messages.length * 2));
   }, [messages.length]);
+
+  // Full-branch outline for the minimap. History is paged in, so the turns the
+  // chat holds are only the newest slice; the outline lists every turn on the
+  // active branch and lets the rail page down to one that is not loaded yet.
+  const [outline, setOutline] = useState<SessionOutline | null>(null);
+  const loadedTurnCount = useMemo(
+    () => messages.reduce((count, message) => (isMessageGroupAnchor(message) ? count + 1 : count), 0),
+    [messages],
+  );
+  const outlineSessionId = session?.id ?? null;
+
+  useEffect(() => {
+    if (!outlineSessionId) {
+      setOutline(null);
+      return;
+    }
+    const controller = new AbortController();
+    // Dropped before the refetch so the rail cannot render one branch's turns
+    // while the chat already shows another.
+    setOutline(null);
+    const params = new URLSearchParams();
+    if (activeLeafId) params.set("leafId", activeLeafId);
+    void fetch(`/api/sessions/${encodeURIComponent(outlineSessionId)}/outline?${params}`, {
+      signal: controller.signal,
+      cache: "no-store",
+    })
+      .then((res) => (res.ok ? res.json() as Promise<SessionOutline> : null))
+      .then((data) => {
+        if (data && !controller.signal.aborted) setOutline(data);
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, [outlineSessionId, activeLeafId, loadedTurnCount]);
+
+  // An outline turn that is not in memory yet: page history down to it, render
+  // everything loaded, then scroll to the entry the rail asked for.
+  const [pendingOutlineScroll, setPendingOutlineScroll] = useState<string | null>(null);
+  const outlineJumpRef = useRef<string | null>(null);
+
+  const jumpToOutlineEntry = useCallback((entryId: string) => {
+    const sessionId = sessionIdRef.current;
+    if (!sessionId || loading || sessionBusy) return;
+    outlineJumpRef.current = entryId;
+    const controller = new AbortController();
+
+    const locate = async (): Promise<boolean> => {
+      if (searchHistoryRef.current.entryIds.includes(entryId)) return true;
+      let cursor = searchHistoryRef.current.historyCursor;
+      for (let page = 0; page < CHAT_JUMP_MAX_PAGES && cursor; page += 1) {
+        if (controller.signal.aborted) return false;
+        const container = scrollContainerRef.current;
+        if (container) {
+          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+        }
+        const context = await loadContext(sessionId, activeLeafId, cursor, {
+          tail: CHAT_JUMP_PAGE_SIZE,
+          signal: controller.signal,
+        });
+        if (!context) return false;
+        if (context.entryIds.includes(entryId)) return true;
+        if (!context.hasMore) return false;
+        cursor = context.oldestEntryId;
+      }
+      return false;
+    };
+
+    void locate().then((found) => {
+      if (!found || controller.signal.aborted || outlineJumpRef.current !== entryId) return;
+      prevScrollDistanceRef.current = null;
+      // Render every loaded entry: the target may be the oldest one, and the
+      // render window only mounts the newest `visibleCount` of them.
+      setVisibleCount((current) => Math.max(current, searchHistoryRef.current.entryIds.length + 1));
+      setPendingOutlineScroll(entryId);
+    });
+  }, [activeLeafId, loadContext, loading, scrollContainerRef, sessionBusy, sessionIdRef]);
+
+  useLayoutEffect(() => {
+    if (!pendingOutlineScroll) return;
+    const selector = `[data-entry-id="${CSS.escape(pendingOutlineScroll)}"]`;
+    const element = scrollContainerRef.current?.querySelector<HTMLElement>(selector);
+    if (element) {
+      scrollToMessage(element);
+      element.animate([
+        { backgroundColor: "var(--bg-selected)" },
+        { backgroundColor: "transparent" },
+      ], { duration: 2500 });
+    }
+    setPendingOutlineScroll(null);
+  }, [pendingOutlineScroll, scrollContainerRef, scrollToMessage]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   useScrollbarVisibility(scrollContainerRef, Boolean(session?.id) || !isEmptyNew);
@@ -1232,10 +1325,13 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         {isMobile || pendingScrollRestore ? null : (
           <ChatMinimap
             messages={messages}
+            entryIds={entryIds}
             streamingMessage={streamState.streamingMessage}
             scrollContainer={scrollContainerRef}
             messageRefs={messageRefs}
+            outline={outline}
             onRevealHistory={revealHistoryForMinimap}
+            onJumpToEntry={jumpToOutlineEntry}
           />
         )}
         </>}

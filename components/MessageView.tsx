@@ -755,24 +755,25 @@ function AssistantMessageView({
     <div
       data-message-role="assistant"
       data-entry-id={entryId}
+      aria-label={message.provider
+        ? getModelDisplayName(message.provider, message.model, modelNames)
+        : undefined}
       style={{ marginBottom: 16 }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      {/* Model label */}
+      {/* Streaming rate. The model name used to lead this row; it repeated the
+          same label above every turn, so it is gone. */}
       <div
         style={{
           fontSize: 11,
           color: "var(--text-dim)",
-          marginBottom: 4,
+          marginBottom: isStreaming ? 4 : 0,
           display: "flex",
           alignItems: "center",
           gap: 6,
         }}
       >
-        {message.provider && (
-          <span>{getModelDisplayName(message.provider, message.model, modelNames)}</span>
-        )}
         {isStreaming && (() => {
           const est = Math.round(estimatedTokens);
           return (
