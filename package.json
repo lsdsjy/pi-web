@@ -17,8 +17,10 @@
   "bin": {
     "pi-web": "bin/pi-web.js"
   },
+  "main": "electron/main.cjs",
   "files": [
     "bin",
+    "electron",
     ".next",
     "!.next/cache",
     "!.next/dev",
@@ -29,6 +31,7 @@
   ],
   "scripts": {
     "postinstall": "node bin/prepare-terminal.js",
+    "electron": "electron .",
     "dev": "next dev -H 127.0.0.1 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
     "build": "next build --webpack",
@@ -68,6 +71,7 @@
     "@types/semver": "7.8.0",
     "@types/web-push": "^3.6.4",
     "ansi_up": "^6.0.6",
+    "electron": "^44.4.5",
     "eslint": "^9",
     "eslint-config-next": "16.3.6",
     "jiti": "^2.7.0",
