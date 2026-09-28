@@ -66,6 +66,7 @@ echo "==> Staging app sources"
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/electron"
 cp "${PROJECT_DIR}/electron/main.cjs" "${STAGE}/electron/main.cjs"
+cp "${PROJECT_DIR}/electron/preload.cjs" "${STAGE}/electron/preload.cjs"
 cat > "${STAGE}/package.json" <<JSON
 {
   "name": "pi-web-desktop",

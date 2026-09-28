@@ -11,7 +11,7 @@
  * wise start `next dev` (no production build) or the pi-web CLI (`next start`).
  */
 
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, Notification, ipcMain, shell } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const net = require("net");
@@ -60,6 +60,75 @@ function resolveProjectDir() {
 }
 
 let PROJECT_DIR = path.join(__dirname, "..");
+
+const BUNDLE_ID = "com.agegr.pi-web.desktop";
+// `terminal-notifier -activate` needs a real bundle id. The dev run is plain
+// Electron.app, which carries Electron's own id.
+const ACTIVATOR_BUNDLE_ID = app.isPackaged ? BUNDLE_ID : "com.github.Electron";
+
+/* ------------------------------------------------------------ notifications */
+
+/**
+ * Electron's own notifications never appear on macOS when the bundle is only
+ * ad-hoc signed: the app never registers with the notification centre, so
+ * UNUserNotificationCenter drops the request. terminal-notifier is a separate
+ * process that macOS accepts, so prefer it and keep Electron's Notification as
+ * the fallback for signed builds.
+ */
+let terminalNotifierPath;
+
+function resolveTerminalNotifier() {
+  if (terminalNotifierPath !== undefined) return terminalNotifierPath;
+  const candidates = [
+    process.env.PI_WEB_NOTIFIER,
+    findOnPath("terminal-notifier"),
+    "/opt/homebrew/bin/terminal-notifier",
+    "/usr/local/bin/terminal-notifier",
+  ];
+  terminalNotifierPath = candidates.find((candidate) => candidate && fs.existsSync(candidate)) || null;
+  return terminalNotifierPath;
+}
+
+function deliverNotification(payload) {
+  const title = String(payload?.title ?? "Pi Web");
+  const body = String(payload?.body ?? "");
+  const tag = payload?.tag ? String(payload.tag) : "";
+
+  const notifier = resolveTerminalNotifier();
+  if (notifier) {
+    const args = ["-title", title, "-message", body];
+    // -group makes macOS replace the previous notification for the same session
+    // in place, which matches the tag semantics the web app already uses.
+    if (tag) args.push("-group", tag);
+    args.push("-activate", ACTIVATOR_BUNDLE_ID);
+    try {
+      spawn(notifier, args, { stdio: "ignore", detached: true }).unref();
+      return "terminal-notifier";
+    } catch (error) {
+      console.warn(`[pi-web] terminal-notifier failed: ${error.message}`);
+    }
+  }
+
+  if (Notification.isSupported()) {
+    new Notification({ title, body }).show();
+    return "electron";
+  }
+  return "none";
+}
+
+function setDockBadge(value) {
+  if (process.env.PI_WEB_DEBUG_NOTIFY === "1") {
+    console.log("[pi-web][badge:set]", value);
+  }
+  if (process.platform !== "darwin" || !app.dock) return;
+  const count = Number(value);
+  app.dock.setBadge(Number.isFinite(count) && count > 0 ? String(Math.trunc(count)) : "");
+}
+
+function readDockBadge() {
+  if (process.platform !== "darwin" || !app.dock) return null;
+  return app.dock.getBadge();
+}
 
 /**
  * macOS gets the frameless look: traffic lights float inside the window
@@ -138,6 +207,85 @@ const DRAG_REGION_CSS = `
     -webkit-app-region: drag;
   }
 `;
+
+/**
+ * Injected into the page's own world (contextIsolation stays on). It does two
+ * things the app has no way to do by itself:
+ *
+ * 1. Replaces window.Notification so the existing turn-complete notification
+ *    code reaches the main process instead of a dead end in the renderer.
+ * 2. Mirrors the unread-session count onto the macOS dock badge. The app keeps
+ *    that set in localStorage, so wrapping Storage covers every update without
+ *    touching app code.
+ */
+const RENDERER_SHIM = `(() => {
+  try {
+  if (window.__piWebDesktopShim) return "already";
+  const desktop = window.piWebDesktop;
+  if (!desktop) return "no bridge";
+  if (typeof desktop.setBadge !== "function") return "no setBadge";
+  if (typeof desktop.notify !== "function") return "no notify";
+  window.__piWebDesktopShim = true;
+
+  function DesktopNotification(title, options) {
+    this.title = String(title);
+    const opts = options || {};
+    this.body = opts.body ? String(opts.body) : "";
+    this.tag = opts.tag ? String(opts.tag) : "";
+    this.onclick = null;
+    this.close = function () {};
+    forward(String(title), options);
+  }
+  DesktopNotification.permission = "granted";
+  DesktopNotification.requestPermission = function () { return Promise.resolve("granted"); };
+  try { window.Notification = DesktopNotification; } catch (error) { return "assign failed"; }
+
+  // showBrowserNotification() prefers the service-worker path when a
+  // registration exists. Electron has no OS-level notifications there, so route
+  // it to the same bridge and resolve, which stops the fallback from firing a
+  // second time.
+  const forward = (title, options) => {
+    const opts = options || {};
+    void desktop.notify({
+      title: String(title),
+      body: opts.body ? String(opts.body) : "",
+      tag: opts.tag ? String(opts.tag) : "",
+    });
+  };
+  if (window.ServiceWorkerRegistration && "showNotification" in ServiceWorkerRegistration.prototype) {
+    ServiceWorkerRegistration.prototype.showNotification = function (title, options) {
+      forward(title, options);
+      return Promise.resolve();
+    };
+  }
+
+  const UNREAD_KEY = "pi-web:unread-session-ids";
+  const count = (raw) => {
+    if (!raw) return 0;
+    try {
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed) ? parsed.length : 0;
+    } catch (error) { return 0; }
+  };
+  const push = () => { void desktop.setBadge(count(window.localStorage.getItem(UNREAD_KEY))); };
+  const setItem = Storage.prototype.setItem;
+  const removeItem = Storage.prototype.removeItem;
+  Storage.prototype.setItem = function (key, value) {
+    const result = setItem.apply(this, arguments);
+    if (key === UNREAD_KEY) push();
+    return result;
+  };
+  Storage.prototype.removeItem = function (key) {
+    const result = removeItem.apply(this, arguments);
+    if (key === UNREAD_KEY) push();
+    return result;
+  };
+  push();
+  return "ok";
+  } catch (error) {
+    return "throw: " + (error && error.message ? error.message : String(error));
+  }
+})()`;
 
 /**
  * Fallback for when the app's header markup does not match the selectors above.
@@ -390,6 +538,7 @@ function createWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
+      preload: path.join(__dirname, "preload.cjs"),
     },
   });
 
@@ -518,6 +667,56 @@ function createWindow() {
     });
   }
 
+  // Notification probe: PI_WEB_DEBUG_NOTIFY=1 reports what the renderer can do
+  // and fires one notification from each of the two available paths.
+  if (process.env.PI_WEB_DEBUG_NOTIFY === "1") {
+    mainWindow.webContents.on("did-finish-load", async () => {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      if (!mainWindow.webContents.getURL().startsWith("http")) return;
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+
+      const js = (expr) => mainWindow.webContents.executeJavaScript(expr);
+      const state = await js(`(() => ({
+        hasNotification: "Notification" in window,
+        permission: "Notification" in window ? Notification.permission : null,
+        serviceWorker: "serviceWorker" in navigator,
+        secureContext: window.isSecureContext,
+      }))()`);
+      console.log("[pi-web][notify:renderer-state]", JSON.stringify(state));
+
+      console.log(
+        "[pi-web][notify:sw-registration]",
+        await js(`navigator.serviceWorker.getRegistration().then((r) => r ? "registered" : "none").catch((e) => "error: " + e.message)`),
+      );
+      console.log(
+        "[pi-web][notify:sw-showNotification]",
+        await js(`navigator.serviceWorker.getRegistration()
+          .then((r) => r ? r.showNotification("Pi Web sw 测试", { body: "service worker 路径" }).then(() => "ok").catch((e) => "throw: " + e.message) : "no registration")
+          .catch((e) => "error: " + e.message)`),
+      );
+      console.log("[pi-web][notify:notifier]", resolveTerminalNotifier() || "none");
+      console.log(
+        "[pi-web][notify:page-path]",
+        await js(`(() => { try { new Notification("Pi Web 页面路径测试", { body: "走 window.Notification shim", tag: "pi-web-debug" }); return "ok"; } catch (e) { return "throw: " + e.message; } })()`),
+      );
+
+      // Exercise the whole badge path (localStorage -> shim -> IPC -> dock) and
+      // put the stored value back so the app's unread state is untouched.
+      const UNREAD = JSON.stringify("pi-web:unread-session-ids");
+      const original = await js(`window.localStorage.getItem(${UNREAD})`);
+      await js(`window.localStorage.setItem(${UNREAD}, JSON.stringify(["__probe_a__", "__probe_b__"]))`);
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      const afterSet = readDockBadge();
+      await js(
+        original === null
+          ? `window.localStorage.removeItem(${UNREAD})`
+          : `window.localStorage.setItem(${UNREAD}, ${JSON.stringify(original)})`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      console.log("[pi-web][badge] wrote 2 ids ->", afterSet, "| restored ->", readDockBadge());
+    });
+  }
+
   // Links that ask for a new window go to the system browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -528,12 +727,31 @@ function createWindow() {
     mainWindow = null;
   });
 
+  // Re-run after every document load; the shim is idempotent. Next.js client-side
+  // navigation keeps the same document, so the shim stays installed.
+  const applyRendererShim = async () => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (!mainWindow.webContents.getURL().startsWith("http")) return;
+    try {
+      const result = await mainWindow.webContents.executeJavaScript(RENDERER_SHIM);
+      if (result !== "ok" && result !== "already") {
+        console.warn(`[pi-web] renderer shim not applied: ${result}`);
+      }
+    } catch (error) {
+      console.warn(`[pi-web] renderer shim failed: ${error.message}`);
+    }
+  };
+  mainWindow.webContents.on("dom-ready", applyRendererShim);
+
   showSplash("正在启动本地服务…");
 }
 
 async function boot() {
   PROJECT_DIR = resolveProjectDir();
   console.log(`[pi-web] project directory: ${PROJECT_DIR}`);
+
+  ipcMain.handle("pi-web:notify", (_event, payload) => deliverNotification(payload ?? {}));
+  ipcMain.handle("pi-web:badge", (_event, count) => setDockBadge(count));
 
   createWindow();
 
