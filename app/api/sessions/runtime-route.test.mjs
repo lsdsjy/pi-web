@@ -17,6 +17,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const { DELETE: deleteSession, GET: getSessionDetail, PATCH: renameSession } = await jiti.import("./[id]/route.ts");
 const { GET: getSessionList } = await jiti.import("./route.ts");
+const { GET: getArchivedSessions, POST: restoreArchivedSessionRoute } = await jiti.import("./archived/route.ts");
 const { GET: getRunningSessions } = await jiti.import("../agent/running/route.ts");
 const { GET: getSessionState } = await jiti.import("./[id]/state/route.ts");
 const {
@@ -111,6 +112,21 @@ test("archiving moves the session file into sessions-archive instead of deleting
 
   const listed = await (await getSessionList(new Request("http://localhost/api/sessions"))).json();
   assert.deepEqual(listed.sessions, [], "archived sessions leave the list");
+
+  const archived = await (await getArchivedSessions(new Request("http://localhost/api/sessions/archived"))).json();
+  assert.deepEqual(archived.sessions.map((session) => [session.id, session.firstMessage, session.subagentCount]), [[sessionId, "Archive me", 0]]);
+
+  const restoreRequest = () => new Request("http://localhost/api/sessions/archived", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Host: "localhost" },
+    body: JSON.stringify({ sessionId }),
+  });
+  const restored = await restoreArchivedSessionRoute(restoreRequest());
+  assert.equal(restored.status, 200);
+  assert.equal(await readFile(originalPath, "utf8"), originalText, "restore puts the file back where it was");
+  const relisted = await (await getSessionList(new Request("http://localhost/api/sessions"))).json();
+  assert.deepEqual(relisted.sessions.map((session) => session.id), [sessionId]);
+  assert.equal((await restoreArchivedSessionRoute(restoreRequest())).status, 404, "nothing left to restore");
 });
 
 test("session listing returns a gzip-compressed response when the client accepts it", async (t) => {

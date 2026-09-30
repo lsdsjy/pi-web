@@ -81,6 +81,7 @@ app/api/
   plugins/check/route.ts          POST check plugin package updates
   project-trust/route.ts          GET/POST project trust for package installs
   sessions/search/route.ts        GET session search
+  sessions/archived/route.ts      GET archived sessions | POST { sessionId } restore from sessions-archive
   sessions/pinned/route.ts        GET pinned session ids, PATCH { sessionId, pinned } (~/.pi/agent/pi-web/pinned-sessions.json)
   sessions/[id]/state/route.ts    GET live wrapper state when the session is running
   sessions/[id]/auto-name/route.ts POST generate a session title
@@ -114,7 +115,7 @@ lib/
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
-  session-archive.ts  move session files to ~/.pi/agent/sessions-archive (sidebar "Archive")
+  session-archive.ts  archive/list/restore session files in ~/.pi/agent/sessions-archive
   subagent-settings.ts  read/write ~/.pi/agent/agents/settings.json
   tool-presets.ts     PRESET_NONE/READ_ONLY/DEFAULT/FULL + getPresetFromTools()
   tool-preset-preference.ts  browser-persisted default for fresh sessions
