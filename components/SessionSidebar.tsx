@@ -866,7 +866,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     : undefined;
   const currentWorktreePath = currentWorktree?.path ?? null;
 
-  const commitCustomPath = useCallback(async (candidate?: string) => {
+  const commitCustomPath = useCallback(async (candidate?: string, { remember = true } = {}) => {
     const path = (candidate ?? customPathValue).trim();
     if (!path || customPathValidating) return;
 
@@ -893,8 +893,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         root: data.projectRoot,
         key: data.projectKey,
       });
-      saveLastCustomCwd(data.cwd);
-      setCustomPathValue(data.cwd);
+      if (remember) {
+        saveLastCustomCwd(data.cwd);
+        setCustomPathValue(data.cwd);
+      }
       setSelectedCwd(data.cwd);
       setCustomPathOpen(false);
       setDropdownOpen(false);
@@ -914,16 +916,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     try {
       const res = await fetch("/api/default-cwd", { method: "POST" });
       const data = await res.json() as { cwd?: string; error?: string };
-      if (data.cwd) {
-        setSelectedCwd(data.cwd);
-        setCustomPathOpen(false);
-        setCustomPathError(null);
-        setDropdownOpen(false);
-      }
+      // Select it like any other directory, so validation, project identity and
+      // the file allow-list all go through /api/cwd/validate. It is not a path
+      // the user typed, so the custom-path picker does not remember it.
+      if (data.cwd) await commitCustomPath(data.cwd, { remember: false });
     } catch {
       // ignore
     }
-  }, []);
+  }, [commitCustomPath]);
 
   const handleCreateWorktree = useCallback(async () => {
     const branch = wtNewBranch.trim();
