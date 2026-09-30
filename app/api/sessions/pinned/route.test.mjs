@@ -15,7 +15,7 @@ const jiti = createJiti(import.meta.url, {
   interopDefault: true,
   moduleCache: false,
 });
-const { GET, PUT } = await jiti.import("./route.ts");
+const { GET, PATCH } = await jiti.import("./route.ts");
 
 after(async () => {
   if (originalAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -27,44 +27,49 @@ function getRequest() {
   return new Request("http://localhost/api/sessions/pinned", { headers: { Host: "localhost" } });
 }
 
-function putRequest(body, contentType = "application/json") {
+function patchRequest(body, contentType = "application/json") {
   return new Request("http://localhost/api/sessions/pinned", {
-    method: "PUT",
+    method: "PATCH",
     headers: { "Content-Type": contentType, Host: "localhost" },
     body: typeof body === "string" ? body : JSON.stringify(body),
   });
 }
 
-test("pinned route starts empty and persists the list in order", async () => {
+test("pinned route starts empty and merges single pin changes in order", async () => {
   let response = await GET(getRequest());
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("Cache-Control"), "no-store");
   assert.deepEqual(await response.json(), { sessionIds: [] });
 
-  response = await PUT(putRequest({ sessionIds: ["b", "a", "b"] }));
-  assert.equal(response.status, 200);
-  assert.deepEqual(await response.json(), { sessionIds: ["b", "a"] });
-  assert.deepEqual(JSON.parse(await readFile(pinnedPath, "utf8")), { sessionIds: ["b", "a"] });
+  for (const id of ["a", "b", "c"]) {
+    response = await PATCH(patchRequest({ sessionId: id, pinned: true }));
+    assert.equal(response.status, 200);
+  }
+  response = await PATCH(patchRequest({ sessionId: "a", pinned: true }));
+  assert.deepEqual(await response.json(), { sessionIds: ["a", "c", "b"] });
+  response = await PATCH(patchRequest({ sessionId: "c", pinned: false }));
+  assert.deepEqual(await response.json(), { sessionIds: ["a", "b"] });
+  assert.deepEqual(JSON.parse(await readFile(pinnedPath, "utf8")), { sessionIds: ["a", "b"] });
 
   response = await GET(getRequest());
-  assert.deepEqual(await response.json(), { sessionIds: ["b", "a"] });
+  assert.deepEqual(await response.json(), { sessionIds: ["a", "b"] });
 });
 
 test("pinned route validates the body", async () => {
-  for (const body of [{}, { sessionIds: "a" }, { sessionIds: [1] }, { sessionIds: [""] }, { sessionIds: Array.from({ length: 501 }, (_, i) => `s${i}`) }, null]) {
-    const response = await PUT(putRequest(body));
-    assert.equal(response.status, 400, JSON.stringify(body)?.slice(0, 40));
-    assert.match((await response.json()).error, /sessionIds must be an array/);
+  for (const body of [{}, { sessionId: "a" }, { sessionId: 1, pinned: true }, { sessionId: "", pinned: true }, { sessionId: "a", pinned: "yes" }, null]) {
+    const response = await PATCH(patchRequest(body));
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.match((await response.json()).error, /sessionId: string, pinned: boolean/);
   }
 
-  let response = await PUT(putRequest("{not json"));
+  let response = await PATCH(patchRequest("{not json"));
   assert.equal(response.status, 400);
 
-  response = await PUT(putRequest({ sessionIds: [] }, "text/plain"));
+  response = await PATCH(patchRequest({ sessionId: "z", pinned: true }, "text/plain"));
   assert.equal(response.status, 415);
 
   response = await GET(getRequest());
-  assert.deepEqual(await response.json(), { sessionIds: ["b", "a"] });
+  assert.deepEqual(await response.json(), { sessionIds: ["a", "b"] });
 });
 
 test("pinned route reads a damaged file as no pins and keeps valid entries", async () => {

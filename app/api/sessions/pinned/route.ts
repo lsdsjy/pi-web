@@ -1,5 +1,5 @@
 import { jsonResponse } from "@/lib/json-response";
-import { MAX_PINNED_SESSIONS, parsePinnedSessionIds } from "@/lib/pinned-sessions";
+import { isValidSessionId, setSessionPinned } from "@/lib/pinned-sessions";
 import { readPinnedSessionIds, writePinnedSessionIds } from "@/lib/pinned-sessions-store";
 import { hasJsonContentType, isApiRequestAllowed } from "@/lib/request-security";
 
@@ -20,8 +20,11 @@ export async function GET(request: Request) {
   }
 }
 
-// PUT /api/sessions/pinned { sessionIds } — replaces the whole list.
-export async function PUT(request: Request) {
+// PATCH /api/sessions/pinned { sessionId, pinned } — pins (moves to the front)
+// or unpins one session and returns the whole list. Changes are merged here
+// rather than sent as a full list, so two clients (the desktop shell and a
+// browser tab) cannot overwrite each other's pins with a stale copy.
+export async function PATCH(request: Request) {
   if (!isApiRequestAllowed(request)) {
     return errorResponse(request, "Untrusted API request", 403);
   }
@@ -35,17 +38,15 @@ export async function PUT(request: Request) {
   } catch {
     return errorResponse(request, "Invalid JSON body", 400);
   }
-  const sessionIds = parsePinnedSessionIds((body as { sessionIds?: unknown } | null)?.sessionIds);
-  if (!sessionIds) {
-    return errorResponse(
-      request,
-      `sessionIds must be an array of at most ${MAX_PINNED_SESSIONS} session id strings`,
-      400,
-    );
+  const { sessionId, pinned } = (body ?? {}) as { sessionId?: unknown; pinned?: unknown };
+  if (!isValidSessionId(sessionId) || typeof pinned !== "boolean") {
+    return errorResponse(request, "Body must be { sessionId: string, pinned: boolean }", 400);
   }
 
   try {
-    return jsonResponse(request, { sessionIds: writePinnedSessionIds(sessionIds) }, { headers: NO_STORE });
+    // Read and write are synchronous, so concurrent requests cannot interleave.
+    const next = setSessionPinned(readPinnedSessionIds(), sessionId, pinned);
+    return jsonResponse(request, { sessionIds: writePinnedSessionIds(next) }, { headers: NO_STORE });
   } catch (error) {
     return errorResponse(request, error instanceof Error ? error.message : String(error), 500);
   }

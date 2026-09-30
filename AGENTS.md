@@ -81,7 +81,7 @@ app/api/
   plugins/check/route.ts          POST check plugin package updates
   project-trust/route.ts          GET/POST project trust for package installs
   sessions/search/route.ts        GET session search
-  sessions/pinned/route.ts        GET/PUT pinned session ids (~/.pi/agent/pi-web/pinned-sessions.json)
+  sessions/pinned/route.ts        GET pinned session ids, PATCH { sessionId, pinned } (~/.pi/agent/pi-web/pinned-sessions.json)
   sessions/[id]/state/route.ts    GET live wrapper state when the session is running
   sessions/[id]/auto-name/route.ts POST generate a session title
   terminal/route.ts               POST create a terminal session

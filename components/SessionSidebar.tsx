@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, typ
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies, type SessionFamily } from "@/lib/session-family";
 import { groupByActivity, layoutGroupedRows, visibleListRowIndices, type ActivityBucket, type RowGroup } from "@/lib/activity-groups";
-import { prunePinnedSessionIds, sanitizePinnedSessionIds, setSessionPinned, splitPinned } from "@/lib/pinned-sessions";
+import { sanitizePinnedSessionIds, setSessionPinned, splitPinned } from "@/lib/pinned-sessions";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -596,51 +596,59 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, []);
 
   // Pinned session ids, most recently pinned first. Stored server-side so the
-  // desktop shell and every browser share them.
+  // desktop shell and every browser share them. Each click sends one change,
+  // which the server merges into its list; the response is the new list.
   const [pinnedSessionIds, setPinnedSessionIds] = useState<string[]>([]);
   const pinnedSessionIdsRef = useRef<string[]>([]);
-  const pinnedWriteIdRef = useRef(0);
-  const pinnedWriteChainRef = useRef<Promise<void>>(Promise.resolve());
+  // Bumped by every local change, so an older response cannot overwrite a
+  // newer optimistic state.
+  const pinnedChangeIdRef = useRef(0);
+  const adoptPinnedSessionIds = useCallback((ids: string[]) => {
+    pinnedSessionIdsRef.current = ids;
+    setPinnedSessionIds(ids);
+  }, []);
+  const loadPinnedSessionIds = useCallback(async () => {
+    const changeId = pinnedChangeIdRef.current;
+    try {
+      const res = await fetch(PINNED_SESSIONS_URL, { cache: "no-store" });
+      if (!res.ok) return;
+      const data = await res.json() as { sessionIds?: unknown };
+      if (changeId === pinnedChangeIdRef.current) adoptPinnedSessionIds(sanitizePinnedSessionIds(data.sessionIds));
+    } catch {
+      // Pins are optional; the list still works without them.
+    }
+  }, [adoptPinnedSessionIds]);
+  // Load once, and again whenever the tab comes back, to pick up pins made in
+  // another client (the desktop shell and a browser tab share them).
   useEffect(() => {
-    let active = true;
-    void fetch(PINNED_SESSIONS_URL, { cache: "no-store" })
-      .then((res) => (res.ok ? res.json() as Promise<{ sessionIds?: unknown }> : null))
-      .then((data) => {
-        // A pin toggled while this was in flight is newer than the response.
-        if (!active || !data || pinnedWriteIdRef.current > 0) return;
-        const ids = sanitizePinnedSessionIds(data.sessionIds);
-        pinnedSessionIdsRef.current = ids;
-        setPinnedSessionIds(ids);
-      })
-      .catch(() => {
-        // Pins are optional; the list still works without them.
-      });
-    return () => { active = false; };
-  }, []);
+    void loadPinnedSessionIds();
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") void loadPinnedSessionIds();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+  }, [loadPinnedSessionIds]);
 
-  // Optimistic: show the new list at once, then write it. Writes are chained so
-  // rapid clicks reach the server in order; a failed write rolls back unless a
-  // later click has already replaced the list.
-  const savePinnedSessionIds = useCallback((next: string[]) => {
-    const previous = pinnedSessionIdsRef.current;
-    const writeId = ++pinnedWriteIdRef.current;
-    pinnedSessionIdsRef.current = next;
-    setPinnedSessionIds(next);
-    pinnedWriteChainRef.current = pinnedWriteChainRef.current.then(async () => {
-      try {
-        const res = await fetch(PINNED_SESSIONS_URL, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sessionIds: next }),
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      } catch {
-        if (writeId !== pinnedWriteIdRef.current) return;
-        pinnedSessionIdsRef.current = previous;
-        setPinnedSessionIds(previous);
+  const setSessionPinnedRemote = useCallback(async (sessionId: string, pinned: boolean) => {
+    const changeId = ++pinnedChangeIdRef.current;
+    adoptPinnedSessionIds(setSessionPinned(pinnedSessionIdsRef.current, sessionId, pinned));
+    try {
+      const res = await fetch(PINNED_SESSIONS_URL, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId, pinned }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json() as { sessionIds?: unknown };
+      if (changeId === pinnedChangeIdRef.current) adoptPinnedSessionIds(sanitizePinnedSessionIds(data.sessionIds));
+    } catch {
+      // Fall back to whatever the server has.
+      if (changeId === pinnedChangeIdRef.current) {
+        pinnedChangeIdRef.current++;
+        void loadPinnedSessionIds();
       }
-    });
-  }, []);
+    }
+  }, [adoptPinnedSessionIds, loadPinnedSessionIds]);
 
   const initialLoadDone = useRef(false);
   useEffect(() => {
@@ -1328,21 +1336,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const pinnedIdSet = useMemo(() => new Set(pinnedSessionIds), [pinnedSessionIds]);
 
   const handleTogglePinned = useCallback((sessionId: string, pinned: boolean) => {
-    let next = setSessionPinned(pinnedSessionIdsRef.current, sessionId, pinned);
-    // Drop pins whose session is gone (deleted elsewhere) while writing anyway.
-    if (allSessionFamilies.length > 0) {
-      next = prunePinnedSessionIds(next, new Set(allSessionFamilies.map((family) => family.root.id)));
-    }
-    savePinnedSessionIds(next);
-  }, [allSessionFamilies, savePinnedSessionIds]);
+    void setSessionPinnedRemote(sessionId, pinned);
+  }, [setSessionPinnedRemote]);
 
   const handleSessionRowDeleted = useCallback((sessionId: string) => {
-    if (pinnedSessionIdsRef.current.includes(sessionId)) {
-      savePinnedSessionIds(setSessionPinned(pinnedSessionIdsRef.current, sessionId, false));
-    }
+    if (pinnedSessionIdsRef.current.includes(sessionId)) void setSessionPinnedRemote(sessionId, false);
     onSessionDeleted?.(sessionId);
     void loadSessions();
-  }, [loadSessions, onSessionDeleted, savePinnedSessionIds]);
+  }, [loadSessions, onSessionDeleted, setSessionPinnedRemote]);
 
   // One variable-height virtual list for both modes. Pinned sessions from every
   // workspace come first; below them either the selected workspace's sessions
@@ -2179,7 +2180,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 ? family.root
                 : { ...family.root, modified: family.latestModified };
               const isPinned = pinnedIdSet.has(family.root.id);
-              // Bubble blur after the input's save handler before releasing the row.
               return (
                 <div
                   key={row.key}
@@ -2765,9 +2765,9 @@ function SessionItem({
               ) : isUnread ? (
                 <UnreadSessionIndicator />
               ) : (
-                <span title={session.modified}>{formatRelativeTime(session.modified, locale)}</span>
+                <span title={session.modified} style={{ flexShrink: 0, whiteSpace: "nowrap" }}>{formatRelativeTime(session.modified, locale)}</span>
               )}
-              <span>
+              <span style={{ flexShrink: 0, whiteSpace: "nowrap" }}>
                 {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
               </span>
               {isPinned && (

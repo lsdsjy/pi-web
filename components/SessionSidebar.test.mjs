@@ -16,10 +16,13 @@ test("the session list is one grouped virtual list with pinned sessions first", 
   assert.match(source, /onClick=\{\(\) => handleSelectSessionFromList\(family\.root\)\}/);
 });
 
-test("pins load once, update optimistically, and leave with a deleted session", () => {
+test("pins reload on focus, send single changes, and leave with a deleted session", () => {
   assert.match(source, /fetch\(PINNED_SESSIONS_URL, \{ cache: "no-store" \}\)/);
-  assert.match(source, /method: "PUT",[\s\S]*?body: JSON\.stringify\(\{ sessionIds: next \}\)/);
-  assert.match(source, /const handleSessionRowDeleted[\s\S]*?setSessionPinned\(pinnedSessionIdsRef\.current, sessionId, false\)/);
+  assert.match(source, /visibilitychange[\s\S]*?loadPinnedSessionIds\(\)/);
+  // One change per request: a full-list write from a stale client would drop others' pins.
+  assert.match(source, /method: "PATCH",[\s\S]*?body: JSON\.stringify\(\{ sessionId, pinned \}\)/);
+  assert.doesNotMatch(source, /method: "PUT"/);
+  assert.match(source, /const handleSessionRowDeleted[\s\S]*?setSessionPinnedRemote\(sessionId, false\)/);
   assert.match(sessionItemSource, /onTogglePinned\?\.\(session\.id, !isPinned\)/);
 });
 

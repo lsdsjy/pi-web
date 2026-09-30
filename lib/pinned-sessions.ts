@@ -9,21 +9,10 @@
 export const MAX_PINNED_SESSIONS = 500;
 export const MAX_PINNED_SESSION_ID_LENGTH = 256;
 
-function isValidSessionId(value: unknown): value is string {
+export function isValidSessionId(value: unknown): value is string {
   return typeof value === "string"
     && value.trim().length > 0
     && value.length <= MAX_PINNED_SESSION_ID_LENGTH;
-}
-
-/**
- * Strict validation for request bodies: `null` unless `value` is an array of
- * at most `MAX_PINNED_SESSIONS` non-empty id strings. Duplicates are dropped,
- * keeping the first (most recently pinned) occurrence.
- */
-export function parsePinnedSessionIds(value: unknown): string[] | null {
-  if (!Array.isArray(value) || value.length > MAX_PINNED_SESSIONS) return null;
-  if (!value.every(isValidSessionId)) return null;
-  return [...new Set(value)];
 }
 
 /**
@@ -39,12 +28,6 @@ export function sanitizePinnedSessionIds(value: unknown): string[] {
 export function setSessionPinned(ids: readonly string[], id: string, pinned: boolean): string[] {
   const rest = ids.filter((existing) => existing !== id);
   return pinned ? [id, ...rest].slice(0, MAX_PINNED_SESSIONS) : rest;
-}
-
-/** Drops ids that no longer name a listed session. Returns `ids` itself when nothing changed. */
-export function prunePinnedSessionIds<T extends readonly string[]>(ids: T, knownIds: ReadonlySet<string>): T | string[] {
-  const kept = ids.filter((id) => knownIds.has(id));
-  return kept.length === ids.length ? ids : kept;
 }
 
 /**
