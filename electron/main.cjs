@@ -89,6 +89,29 @@ function resolveTerminalNotifier() {
   return terminalNotifierPath;
 }
 
+/* ----------------------------------------------------------- dock badge */
+
+// Unread sessions as counted by the web app. The shim mirrors
+// pi-web:unread-session-ids from localStorage onto this.
+let unreadSessionCount = 0;
+// Sessions that finished, or asked for input, while the window was unfocused.
+// Cleared when the window comes back to the front.
+//
+// Both halves are needed: AppShell only raises a notification for the session
+// that is currently open, so the app's own unread set never covers "the agent
+// finished while I was in another app and that session was the open one".
+const pendingAttention = new Set();
+
+function refreshDockBadge() {
+  setDockBadge(unreadSessionCount + pendingAttention.size);
+}
+
+function rememberAttention(tag) {
+  if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return;
+  pendingAttention.add(tag || "pi-web");
+  refreshDockBadge();
+}
+
 function deliverNotification(payload) {
   const title = String(payload?.title ?? "Pi Web");
   const body = String(payload?.body ?? "");
@@ -103,6 +126,7 @@ function deliverNotification(payload) {
     args.push("-activate", ACTIVATOR_BUNDLE_ID);
     try {
       spawn(notifier, args, { stdio: "ignore", detached: true }).unref();
+      rememberAttention(tag);
       return "terminal-notifier";
     } catch (error) {
       console.warn(`[pi-web] terminal-notifier failed: ${error.message}`);
@@ -111,17 +135,21 @@ function deliverNotification(payload) {
 
   if (Notification.isSupported()) {
     new Notification({ title, body }).show();
+    rememberAttention(tag);
     return "electron";
   }
   return "none";
 }
 
 function setDockBadge(value) {
+  // PI_WEB_DEBUG_BADGE pins the badge so the dock rendering can be checked
+  // independently of whether the app has counted any unread sessions yet.
+  const forced = process.env.PI_WEB_DEBUG_BADGE;
+  const count = forced !== undefined ? Number(forced) : Number(value);
   if (process.env.PI_WEB_DEBUG_NOTIFY === "1") {
-    console.log("[pi-web][badge:set]", value);
+    console.log("[pi-web][badge:set]", count);
   }
   if (process.platform !== "darwin" || !app.dock) return;
-  const count = Number(value);
   app.dock.setBadge(Number.isFinite(count) && count > 0 ? String(Math.trunc(count)) : "");
 }
 
@@ -146,6 +174,10 @@ const TRAFFIC_LIGHT_SIZE = { width: 52, height: 12 };
 // Left padding the app's top rows need to clear the lights, plus a 6px gap.
 const LIGHT_INSET = TRAFFIC_LIGHT_POSITION.x + TRAFFIC_LIGHT_SIZE.width + 6;
 const FALLBACK_STRIP_HEIGHT = 32;
+// How long the brand row may stay unrecognized before the strip is reserved,
+// and how often that is re-checked for the lifetime of the page.
+const STRIP_FALLBACK_DELAY_MS = 5000;
+const TITLEBAR_CHECK_INTERVAL_MS = 1000;
 
 function trafficLightBox() {
   return { ...TRAFFIC_LIGHT_POSITION, ...TRAFFIC_LIGHT_SIZE };
@@ -164,6 +196,15 @@ function trafficLightBox() {
 const INLINE_TITLEBAR_CSS = `
   #session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) {
     padding-left: ${LIGHT_INSET}px !important;
+  }
+  /* The inset leaves no room for the "New" label next to the other header
+     buttons, so it collapses to its + icon (the tooltip keeps the name). */
+  #session-sidebar .sidebar-new-label {
+    display: none !important;
+  }
+  #session-sidebar .sidebar-new-button {
+    width: 32px !important;
+    padding: 0 !important;
   }
   #session-sidebar.sidebar-closed + div > div:first-child > div:first-child {
     padding-left: ${LIGHT_INSET}px !important;
@@ -545,24 +586,56 @@ function createWindow() {
   if (INSET_TITLEBAR) {
     // insertCSS applies to the current document only, so re-apply after every
     // navigation. Skip the data: URL splash screens.
+    //
+    // The inline layout is always installed (its selectors are inert when the
+    // markup differs). The strip fallback is only added after the brand row has
+    // stayed unrecognized for a while, and is removed again as soon as the row
+    // shows up. A one-shot probe at load time would lock in the strip whenever
+    // the page loaded mid-compile or before the header rendered.
+    let titlebarWatch = null;
     const applyTitlebarCss = async () => {
+      if (titlebarWatch) clearInterval(titlebarWatch);
+      titlebarWatch = null;
       if (!mainWindow || mainWindow.isDestroyed()) return;
-      if (!mainWindow.webContents.getURL().startsWith("http")) return;
-      let matched = false;
-      try {
-        matched = await mainWindow.webContents.executeJavaScript(BRAND_ROW_PROBE);
-      } catch {
-        matched = false;
-      }
-      if (matched) {
-        await mainWindow.webContents.insertCSS(INLINE_TITLEBAR_CSS);
-      } else {
-        console.warn("[pi-web] sidebar header not recognized; reserving a title bar strip");
-        await mainWindow.webContents.insertCSS(STRIP_TITLEBAR_CSS);
-      }
-      await mainWindow.webContents.insertCSS(DRAG_REGION_CSS);
+      const contents = mainWindow.webContents;
+      if (!contents.getURL().startsWith("http")) return;
+      await contents.insertCSS(INLINE_TITLEBAR_CSS);
+      await contents.insertCSS(DRAG_REGION_CSS);
+
+      let stripKey = null;
+      let missingSince = Date.now();
+      let busy = false;
+      const check = async () => {
+        if (busy || !mainWindow || mainWindow.isDestroyed()) return;
+        busy = true;
+        try {
+          const matched = await contents.executeJavaScript(BRAND_ROW_PROBE).catch(() => false);
+          if (matched) {
+            if (missingSince !== null) console.log("[pi-web] title bar: traffic lights inline with the sidebar header");
+            missingSince = null;
+            if (stripKey) {
+              await contents.removeInsertedCSS(stripKey).catch(() => {});
+              stripKey = null;
+            }
+          } else {
+            missingSince ??= Date.now();
+            if (!stripKey && Date.now() - missingSince >= STRIP_FALLBACK_DELAY_MS) {
+              console.warn("[pi-web] sidebar header not recognized; reserving a title bar strip");
+              stripKey = await contents.insertCSS(STRIP_TITLEBAR_CSS);
+            }
+          }
+        } finally {
+          busy = false;
+        }
+      };
+      await check();
+      titlebarWatch = setInterval(check, TITLEBAR_CHECK_INTERVAL_MS);
     };
     mainWindow.webContents.on("did-finish-load", applyTitlebarCss);
+    mainWindow.on("closed", () => {
+      if (titlebarWatch) clearInterval(titlebarWatch);
+      titlebarWatch = null;
+    });
   }
 
   // Layout check for the inset title bar. Run with PI_WEB_DEBUG_LAYOUT=1 to print,
@@ -703,17 +776,36 @@ function createWindow() {
       // Exercise the whole badge path (localStorage -> shim -> IPC -> dock) and
       // put the stored value back so the app's unread state is untouched.
       const UNREAD = JSON.stringify("pi-web:unread-session-ids");
+      console.log(
+        "[pi-web][badge:after-notify]",
+        `unread=${unreadSessionCount} pending=${pendingAttention.size} tile=${readDockBadge()}`,
+      );
       const original = await js(`window.localStorage.getItem(${UNREAD})`);
       await js(`window.localStorage.setItem(${UNREAD}, JSON.stringify(["__probe_a__", "__probe_b__"]))`);
       await new Promise((resolve) => setTimeout(resolve, 700));
-      const afterSet = readDockBadge();
+      console.log(
+        "[pi-web][badge:after-unread]",
+        `unread=${unreadSessionCount} pending=${pendingAttention.size} tile=${readDockBadge()}`,
+      );
       await js(
         original === null
           ? `window.localStorage.removeItem(${UNREAD})`
           : `window.localStorage.setItem(${UNREAD}, ${JSON.stringify(original)})`,
       );
       await new Promise((resolve) => setTimeout(resolve, 700));
-      console.log("[pi-web][badge] wrote 2 ids ->", afterSet, "| restored ->", readDockBadge());
+      console.log(
+        "[pi-web][badge:restored]",
+        `unread=${unreadSessionCount} pending=${pendingAttention.size} tile=${readDockBadge()}`,
+      );
+
+      // Focusing the window is what clears the attention half.
+      mainWindow.show();
+      mainWindow.focus();
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      console.log(
+        "[pi-web][badge:after-focus]",
+        `unread=${unreadSessionCount} pending=${pendingAttention.size} tile=${readDockBadge()}`,
+      );
     });
   }
 
@@ -725,6 +817,14 @@ function createWindow() {
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+  });
+
+  // Coming back to the window is the signal that the user has seen whatever the
+  // dock badge was counting.
+  mainWindow.on("focus", () => {
+    if (pendingAttention.size === 0) return;
+    pendingAttention.clear();
+    refreshDockBadge();
   });
 
   // Re-run after every document load; the shim is idempotent. Next.js client-side
@@ -751,7 +851,11 @@ async function boot() {
   console.log(`[pi-web] project directory: ${PROJECT_DIR}`);
 
   ipcMain.handle("pi-web:notify", (_event, payload) => deliverNotification(payload ?? {}));
-  ipcMain.handle("pi-web:badge", (_event, count) => setDockBadge(count));
+  ipcMain.handle("pi-web:badge", (_event, count) => {
+    const parsed = Number(count);
+    unreadSessionCount = Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0;
+    refreshDockBadge();
+  });
 
   createWindow();
 
