@@ -69,22 +69,37 @@ export function groupByActivity<T>(
   return groups;
 }
 
-export type ActivityRow<T> =
-  | { type: "header"; key: string; bucket: ActivityBucket; top: number; height: number }
+/** A run of list rows, optionally introduced by a header row. */
+export interface RowGroup<T, H> {
+  key: string;
+  header: H | null;
+  /** Overrides the layout's header height for this group's header. */
+  headerHeight?: number;
+  items: readonly T[];
+}
+
+export type ListRow<T, H> =
+  | { type: "header"; key: string; header: H; top: number; height: number }
   | { type: "item"; key: string; item: T; top: number; height: number };
 
-/** Flattens groups into positioned rows for a variable-height virtual list. */
-export function layoutActivityRows<T>(
-  groups: readonly ActivityGroup<T>[],
+/**
+ * Flattens groups into positioned rows for a variable-height virtual list.
+ * Item keys must be unique across all groups; header keys are `h:<group key>`.
+ */
+export function layoutGroupedRows<T, H>(
+  groups: readonly RowGroup<T, H>[],
   itemKey: (item: T) => string,
   headerHeight: number,
   itemHeight: number,
-): { rows: ActivityRow<T>[]; totalHeight: number } {
-  const rows: ActivityRow<T>[] = [];
+): { rows: ListRow<T, H>[]; totalHeight: number } {
+  const rows: ListRow<T, H>[] = [];
   let top = 0;
   for (const group of groups) {
-    rows.push({ type: "header", key: `h:${group.key}`, bucket: group.bucket, top, height: headerHeight });
-    top += headerHeight;
+    if (group.header !== null) {
+      const height = group.headerHeight ?? headerHeight;
+      rows.push({ type: "header", key: `h:${group.key}`, header: group.header, top, height });
+      top += height;
+    }
     for (const item of group.items) {
       rows.push({ type: "item", key: itemKey(item), item, top, height: itemHeight });
       top += itemHeight;
@@ -111,4 +126,22 @@ export function visibleActivityRowIndices(
     indices.push(index);
   }
   return indices;
+}
+
+/**
+ * Visible row indices, plus the row keyed `keepKey` (e.g. one holding an
+ * inline rename input) even while it is scrolled out of the window.
+ */
+export function visibleListRowIndices(
+  rows: readonly { key: string; top: number; height: number }[],
+  scrollTop: number,
+  viewportHeight: number,
+  keepKey: string | null = null,
+): number[] {
+  const indices = visibleActivityRowIndices(rows, scrollTop, viewportHeight);
+  if (keepKey === null) return indices;
+  const keepIndex = rows.findIndex((row) => row.key === keepKey);
+  if (keepIndex < 0 || indices.includes(keepIndex)) return indices;
+  indices.push(keepIndex);
+  return indices.sort((a, b) => a - b);
 }

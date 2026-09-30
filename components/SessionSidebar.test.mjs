@@ -1,36 +1,26 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { createJiti } from "jiti";
-
-const jiti = createJiti(import.meta.url, { jsx: { runtime: "automatic" }, tsconfigPaths: true });
-const { getSessionListIndices } = await jiti.import("./SessionSidebar.tsx");
 
 const source = await readFile(new URL("./SessionSidebar.tsx", import.meta.url), "utf8");
 const globalStyles = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const sessionItemSource = source.slice(source.indexOf("function SessionItem("));
 
-test("scrolling keeps the focused session and the viewport mounted without expanding the whole window", () => {
-  for (const [scrollTop, focusedIndex] of [[0, 1999], [10000, 0]]) {
-    const indices = getSessionListIndices(2000, scrollTop, 335, focusedIndex);
-    const firstVisible = Math.floor(scrollTop / 54);
-    const lastVisible = Math.ceil((scrollTop + 335) / 54) - 1;
-    for (let index = firstVisible; index <= lastVisible; index++) assert.ok(indices.includes(index));
-    assert.ok(indices.includes(focusedIndex));
-    assert.equal(indices.length, 24);
-    assert.equal(new Set(indices).size, indices.length);
-    assert.deepEqual(indices, [...indices].sort((a, b) => a - b));
-  }
-  assert.equal(getSessionListIndices(2000, 0, 335, 3).length, 23);
-  const blurred = getSessionListIndices(2000, 10000, 335);
-  assert.equal(blurred.length, 23);
-  assert.ok(!blurred.includes(0));
+test("the session list is one grouped virtual list with pinned sessions first", () => {
+  assert.match(source, /splitPinned\(allSessionFamilies, pinnedSessionIds/);
+  assert.match(source, /groups\.push\(\{ key: "pinned", header: \{ kind: "pinned" \}, items: pinnedFamilies \}\)/);
+  assert.match(source, /visibleListRowIndices\(listLayout\.rows, listScrollTop, listViewportH, focusedSessionId\)/);
+  // Pinned rows can belong to another workspace, so they name it and select
+  // through the same path as activity rows, which switches the workspace.
+  assert.match(source, /projectLabel=\{activityView \|\| isPinned \? projectLabelOf\(family\.root\) : undefined\}/);
+  assert.match(source, /onClick=\{\(\) => handleSelectSessionFromList\(family\.root\)\}/);
 });
 
-test("session windows stay valid after a project shrinks and before the viewport is measured", () => {
-  assert.deepEqual(getSessionListIndices(5, 80000, 335, 1999), [0, 1, 2, 3, 4]);
-  assert.deepEqual(getSessionListIndices(0, 80000, 335, 1999), []);
-  assert.equal(getSessionListIndices(2000, 0, 0).length, 28);
+test("pins load once, update optimistically, and leave with a deleted session", () => {
+  assert.match(source, /fetch\(PINNED_SESSIONS_URL, \{ cache: "no-store" \}\)/);
+  assert.match(source, /method: "PUT",[\s\S]*?body: JSON\.stringify\(\{ sessionIds: next \}\)/);
+  assert.match(source, /const handleSessionRowDeleted[\s\S]*?setSessionPinned\(pinnedSessionIdsRef\.current, sessionId, false\)/);
+  assert.match(sessionItemSource, /onTogglePinned\?\.\(session\.id, !isPinned\)/);
 });
 
 test("only Shift+click bypasses session deletion confirmation", () => {

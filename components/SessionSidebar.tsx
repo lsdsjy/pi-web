@@ -3,7 +3,8 @@
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies, type SessionFamily } from "@/lib/session-family";
-import { groupByActivity, layoutActivityRows, visibleActivityRowIndices, type ActivityBucket } from "@/lib/activity-groups";
+import { groupByActivity, layoutGroupedRows, visibleListRowIndices, type ActivityBucket, type RowGroup } from "@/lib/activity-groups";
+import { prunePinnedSessionIds, sanitizePinnedSessionIds, setSessionPinned, splitPinned } from "@/lib/pinned-sessions";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -23,18 +24,6 @@ import { OPEN_WORKSPACE_PICKER_EVENT } from "./NewSessionWorkspacePicker";
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
 const SESSION_LIST_ITEM_HEIGHT = 54;
-
-export function getSessionListIndices(count: number, scrollTop: number, viewportHeight: number, focusedIndex = -1): number[] {
-  const overscan = 8;
-  const visibleCount = Math.ceil((viewportHeight || 600) / SESSION_LIST_ITEM_HEIGHT) + overscan * 2;
-  const start = Math.max(0, Math.min(Math.floor(scrollTop / SESSION_LIST_ITEM_HEIGHT) - overscan, count - visibleCount));
-  const end = Math.min(count, start + visibleCount);
-  const indices = Array.from({ length: end - start }, (_, offset) => start + offset);
-  // Keep a focused row mounted so scrolling cannot discard an inline rename.
-  if (focusedIndex >= 0 && focusedIndex < start) indices.unshift(focusedIndex);
-  if (focusedIndex >= end && focusedIndex < count) indices.push(focusedIndex);
-  return indices;
-}
 
 declare global {
   interface Window {
@@ -175,6 +164,15 @@ const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const ACTIVITY_VIEW_STORAGE_KEY = "pi-web:sidebar-activity-view";
 const ACTIVITY_HEADER_HEIGHT = 28;
 const ACTIVITY_CLOCK_TICK_MS = 60_000;
+// Thin divider between the Pinned section and the workspace's own sessions.
+const PINNED_SEPARATOR_HEIGHT = 9;
+const PINNED_SESSIONS_URL = "/api/sessions/pinned";
+
+/** Non-item rows of the virtualized session list. */
+type SessionListHeader =
+  | { kind: "pinned" }
+  | { kind: "separator" }
+  | { kind: "activity"; bucket: ActivityBucket };
 
 function loadActivityView(): boolean {
   try {
@@ -595,6 +593,53 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     } finally {
       if (loadId === sessionLoadIdRef.current) setLoading(false);
     }
+  }, []);
+
+  // Pinned session ids, most recently pinned first. Stored server-side so the
+  // desktop shell and every browser share them.
+  const [pinnedSessionIds, setPinnedSessionIds] = useState<string[]>([]);
+  const pinnedSessionIdsRef = useRef<string[]>([]);
+  const pinnedWriteIdRef = useRef(0);
+  const pinnedWriteChainRef = useRef<Promise<void>>(Promise.resolve());
+  useEffect(() => {
+    let active = true;
+    void fetch(PINNED_SESSIONS_URL, { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() as Promise<{ sessionIds?: unknown }> : null))
+      .then((data) => {
+        // A pin toggled while this was in flight is newer than the response.
+        if (!active || !data || pinnedWriteIdRef.current > 0) return;
+        const ids = sanitizePinnedSessionIds(data.sessionIds);
+        pinnedSessionIdsRef.current = ids;
+        setPinnedSessionIds(ids);
+      })
+      .catch(() => {
+        // Pins are optional; the list still works without them.
+      });
+    return () => { active = false; };
+  }, []);
+
+  // Optimistic: show the new list at once, then write it. Writes are chained so
+  // rapid clicks reach the server in order; a failed write rolls back unless a
+  // later click has already replaced the list.
+  const savePinnedSessionIds = useCallback((next: string[]) => {
+    const previous = pinnedSessionIdsRef.current;
+    const writeId = ++pinnedWriteIdRef.current;
+    pinnedSessionIdsRef.current = next;
+    setPinnedSessionIds(next);
+    pinnedWriteChainRef.current = pinnedWriteChainRef.current.then(async () => {
+      try {
+        const res = await fetch(PINNED_SESSIONS_URL, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessionIds: next }),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      } catch {
+        if (writeId !== pinnedWriteIdRef.current) return;
+        pinnedSessionIdsRef.current = previous;
+        setPinnedSessionIds(previous);
+      }
+    });
   }, []);
 
   const initialLoadDone = useRef(false);
@@ -1275,31 +1320,62 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       : null);
 
   const sessionFamilies = useMemo(() => listSessionFamilies(filteredSessions), [filteredSessions]);
+  const allSessionFamilies = useMemo(() => listSessionFamilies(allSessions), [allSessions]);
+  const pinnedFamilies = useMemo(
+    () => splitPinned(allSessionFamilies, pinnedSessionIds, (family) => family.root.id).pinned,
+    [allSessionFamilies, pinnedSessionIds],
+  );
+  const pinnedIdSet = useMemo(() => new Set(pinnedSessionIds), [pinnedSessionIds]);
 
-  // Activity view: every workspace's sessions, newest first, grouped by day.
-  const activityLayout = useMemo(() => {
-    if (!activityView) return { rows: [], totalHeight: 0 };
-    const groups = groupByActivity(
-      listSessionFamilies(allSessions),
-      (family: SessionFamily) => family.latestModified,
-      new Date(activityNow),
-    );
-    return layoutActivityRows(groups, (family) => family.root.id, ACTIVITY_HEADER_HEIGHT, SESSION_LIST_ITEM_HEIGHT);
-  }, [activityView, allSessions, activityNow]);
-
-  const activityIndices = useMemo(() => {
-    if (!activityView) return [];
-    const indices = visibleActivityRowIndices(activityLayout.rows, listScrollTop, listViewportH);
-    // Keep a focused row (e.g. rename input) mounted while scrolled away.
-    const focusedIndex = focusedSessionId
-      ? activityLayout.rows.findIndex((row) => row.type === "item" && row.key === focusedSessionId)
-      : -1;
-    if (focusedIndex >= 0 && !indices.includes(focusedIndex)) {
-      indices.push(focusedIndex);
-      indices.sort((a, b) => a - b);
+  const handleTogglePinned = useCallback((sessionId: string, pinned: boolean) => {
+    let next = setSessionPinned(pinnedSessionIdsRef.current, sessionId, pinned);
+    // Drop pins whose session is gone (deleted elsewhere) while writing anyway.
+    if (allSessionFamilies.length > 0) {
+      next = prunePinnedSessionIds(next, new Set(allSessionFamilies.map((family) => family.root.id)));
     }
-    return indices;
-  }, [activityView, activityLayout, focusedSessionId, listScrollTop, listViewportH]);
+    savePinnedSessionIds(next);
+  }, [allSessionFamilies, savePinnedSessionIds]);
+
+  const handleSessionRowDeleted = useCallback((sessionId: string) => {
+    if (pinnedSessionIdsRef.current.includes(sessionId)) {
+      savePinnedSessionIds(setSessionPinned(pinnedSessionIdsRef.current, sessionId, false));
+    }
+    onSessionDeleted?.(sessionId);
+    void loadSessions();
+  }, [loadSessions, onSessionDeleted, savePinnedSessionIds]);
+
+  // One variable-height virtual list for both modes. Pinned sessions from every
+  // workspace come first; below them either the selected workspace's sessions
+  // or, in the activity view, every workspace grouped by day.
+  const listLayout = useMemo(() => {
+    const groups: RowGroup<SessionFamily, SessionListHeader>[] = [];
+    if (pinnedFamilies.length > 0) {
+      groups.push({ key: "pinned", header: { kind: "pinned" }, items: pinnedFamilies });
+    }
+    if (activityView) {
+      const unpinned = allSessionFamilies.filter((family) => !pinnedIdSet.has(family.root.id));
+      for (const group of groupByActivity(unpinned, (family) => family.latestModified, new Date(activityNow))) {
+        groups.push({ key: group.key, header: { kind: "activity", bucket: group.bucket }, items: group.items });
+      }
+    } else {
+      const unpinned = sessionFamilies.filter((family) => !pinnedIdSet.has(family.root.id));
+      if (unpinned.length > 0) {
+        groups.push({
+          key: "workspace",
+          header: pinnedFamilies.length > 0 ? { kind: "separator" } : null,
+          headerHeight: PINNED_SEPARATOR_HEIGHT,
+          items: unpinned,
+        });
+      }
+    }
+    return layoutGroupedRows(groups, (family) => family.root.id, ACTIVITY_HEADER_HEIGHT, SESSION_LIST_ITEM_HEIGHT);
+  }, [activityView, activityNow, allSessionFamilies, pinnedFamilies, pinnedIdSet, sessionFamilies]);
+
+  // Keep a focused row (e.g. rename input) mounted while scrolled away.
+  const listIndices = useMemo(
+    () => visibleListRowIndices(listLayout.rows, listScrollTop, listViewportH, focusedSessionId),
+    [focusedSessionId, listLayout, listScrollTop, listViewportH],
+  );
 
   const toggleActivityView = useCallback(() => {
     setActivityView((current) => {
@@ -1310,13 +1386,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
   }, []);
   const activityViewLabel = t("sidebar.toggleActivityView");
-
-  const virtualIndices = useMemo(() => getSessionListIndices(
-    sessionFamilies.length,
-    listScrollTop,
-    listViewportH,
-    sessionFamilies.findIndex((family) => family.root.id === focusedSessionId),
-  ), [focusedSessionId, listScrollTop, listViewportH, sessionFamilies]);
 
   return (
     <div
@@ -2044,16 +2113,33 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && (activityView ? activityLayout.rows.length === 0 : sessionFamilies.length === 0) && (
+        {!loading && !error && listLayout.rows.length === 0 && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             {t("sidebar.noSessions")}
           </div>
         )}
-        {activityView && activityLayout.rows.length > 0 && (
-          <div style={{ position: "relative", height: activityLayout.totalHeight }}>
-            {activityIndices.map((index) => {
-              const row = activityLayout.rows[index];
+        {listLayout.rows.length > 0 && (
+          <div style={{ position: "relative", height: listLayout.totalHeight }}>
+            {listIndices.map((index) => {
+              const row = listLayout.rows[index];
               if (row.type === "header") {
+                if (row.header.kind === "separator") {
+                  return (
+                    <div
+                      key={row.key}
+                      role="separator"
+                      style={{
+                        position: "absolute",
+                        top: row.top,
+                        left: 0,
+                        right: 0,
+                        height: row.height,
+                        borderBottom: "1px solid var(--border)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  );
+                }
                 return (
                   <div
                     key={row.key}
@@ -2067,6 +2153,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                       height: row.height,
                       display: "flex",
                       alignItems: "flex-end",
+                      gap: 5,
                       padding: "0 12px 5px 16px",
                       fontSize: 11,
                       fontWeight: 600,
@@ -2075,7 +2162,14 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                       boxSizing: "border-box",
                     }}
                   >
-                    <span>{activityBucketLabel(row.bucket, locale, t)}</span>
+                    {row.header.kind === "pinned" ? (
+                      <>
+                        <PinIcon size={11} filled style={{ marginBottom: 1 }} />
+                        <span>{t("sidebar.pinned")}</span>
+                      </>
+                    ) : (
+                      <span>{activityBucketLabel(row.header.bucket, locale, t)}</span>
+                    )}
                   </div>
                 );
               }
@@ -2084,6 +2178,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               const displaySession = family.latestModified === family.root.modified
                 ? family.root
                 : { ...family.root, modified: family.latestModified };
+              const isPinned = pinnedIdSet.has(family.root.id);
+              // Bubble blur after the input's save handler before releasing the row.
               return (
                 <div
                   key={row.key}
@@ -2093,54 +2189,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 >
                   <SessionItem
                     session={displaySession}
-                    projectLabel={projectLabelOf(family.root)}
+                    // Rows that can come from another workspace name it.
+                    projectLabel={activityView || isPinned ? projectLabelOf(family.root) : undefined}
                     isSelected={familySessions.some((session) => session.id === selectedSessionId)}
                     isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
                     isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
+                    isPinned={isPinned}
+                    onTogglePinned={handleTogglePinned}
                     onClick={() => handleSelectSessionFromList(family.root)}
                     onRenamed={loadSessions}
-                    onDeleted={(id) => {
-                      onSessionDeleted?.(id);
-                      loadSessions();
-                    }}
-                  />
-                </div>
-              );
-            })}
-          </div>
-        )}
-        {!activityView && sessionFamilies.length > 0 && (
-          <div
-            style={{
-              position: "relative",
-              height: sessionFamilies.length * SESSION_LIST_ITEM_HEIGHT,
-            }}
-          >
-            {virtualIndices.map((index) => {
-              const family = sessionFamilies[index];
-              const familySessions = [family.root, ...family.subagents];
-              const displaySession = family.latestModified === family.root.modified
-                ? family.root
-                : { ...family.root, modified: family.latestModified };
-              // Bubble blur after the input's save handler before unpinning the row.
-              return (
-                <div
-                  key={family.root.id}
-                  onFocus={() => setFocusedSessionId(family.root.id)}
-                  onBlur={() => setFocusedSessionId(null)}
-                  style={{ position: "absolute", top: index * SESSION_LIST_ITEM_HEIGHT, left: 0, right: 0 }}
-                >
-                  <SessionItem
-                    session={displaySession}
-                    isSelected={familySessions.some((session) => session.id === selectedSessionId)}
-                    isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
-                    isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
-                    onClick={() => handleSelectSessionFromList(family.root)}
-                    onRenamed={loadSessions}
-                    onDeleted={(id) => {
-                      onSessionDeleted?.(id);
-                      loadSessions();
-                    }}
+                    onDeleted={handleSessionRowDeleted}
                   />
                 </div>
               );
@@ -2427,12 +2485,35 @@ function showProjectActivity(
   );
 }
 
+/** Pushpin glyph; filled marks a pinned session, outlined is the Pin action. */
+function PinIcon({ size = 14, filled = false, style }: { size?: number; filled?: boolean; style?: CSSProperties }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill={filled ? "currentColor" : "none"}
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={{ flexShrink: 0, ...style }}
+    >
+      <path d="M12 17v5" />
+      <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+    </svg>
+  );
+}
+
 function SessionItem({
   session,
   projectLabel,
   isSelected,
   isRunning,
   isUnread,
+  isPinned = false,
+  onTogglePinned,
   onClick,
   onRenamed,
   onDeleted,
@@ -2447,6 +2528,8 @@ function SessionItem({
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
+  isPinned?: boolean;
+  onTogglePinned?: (sessionId: string, pinned: boolean) => void;
   onClick: () => void;
   onRenamed?: () => void;
   onDeleted?: (id: string) => void;
@@ -2525,6 +2608,11 @@ function SessionItem({
       setConfirmDelete(true);
     }
   }, [performDelete]);
+
+  const handlePinClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onTogglePinned?.(session.id, !isPinned);
+  }, [isPinned, onTogglePinned, session.id]);
 
   const handleDeleteConfirm = useCallback((e: React.MouseEvent) => {
     e.stopPropagation();
@@ -2682,6 +2770,11 @@ function SessionItem({
               <span>
                 {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
               </span>
+              {isPinned && (
+                <span title={t("sidebar.pinned")} style={{ display: "flex", alignItems: "center", color: "var(--text-muted)" }}>
+                  <PinIcon size={10} filled />
+                </span>
+              )}
               {projectLabel && (
                 <span
                   title={session.projectRoot ?? session.cwd}
@@ -2748,6 +2841,34 @@ function SessionItem({
                 background: `linear-gradient(to right, transparent, ${isSelected ? "var(--bg-selected)" : "var(--bg-hover)"} 16px)`,
               }}
             >
+              {onTogglePinned && (
+                <button
+                  onClick={handlePinClick}
+                  title={t(isPinned ? "sidebar.unpin" : "sidebar.pin")}
+                  aria-label={t(isPinned ? "sidebar.unpin" : "sidebar.pin")}
+                  aria-pressed={isPinned}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, padding: 0,
+                    background: "var(--bg-hover)", border: "1px solid var(--border)",
+                    borderRadius: 7, color: isPinned ? "var(--accent)" : "var(--text-muted)",
+                    cursor: "pointer", flexShrink: 0,
+                    transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--bg-selected)";
+                    e.currentTarget.style.color = "var(--accent)";
+                    e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = isPinned ? "var(--accent)" : "var(--text-muted)";
+                    e.currentTarget.style.borderColor = "var(--border)";
+                  }}
+                >
+                  <PinIcon filled={isPinned} />
+                </button>
+              )}
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}
