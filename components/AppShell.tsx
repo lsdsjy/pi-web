@@ -55,6 +55,7 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
+import { getRecentProjects } from "@/lib/project-groups";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -1185,6 +1186,18 @@ export function AppShell() {
     observer.observe(document.head, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
   }, [windowTitle]);
+
+  const workspaceProjects = useMemo(() => getRecentProjects(sessionCatalog), [sessionCatalog]);
+
+  // Picked from the new-session page: same path as the sidebar's New button,
+  // with the chosen workspace as the cwd.
+  const handleSelectNewSessionWorkspace = useCallback((cwd: string) => {
+    const sessionId = typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    handleNewSession(sessionId, cwd);
+    handleFocusComposer();
+  }, [handleNewSession, handleFocusComposer]);
 
   const sidebarContent = (
     <>
@@ -2330,6 +2343,8 @@ export function AppShell() {
               onScrollPositionChange={handleSessionScrollPositionChange}
               sessionRunning={Boolean(selectedSession && runningSessionIds.has(selectedSession.id))}
               newSessionCwd={effectiveNewSessionCwd}
+              workspaceProjects={workspaceProjects}
+              onSelectWorkspace={handleSelectNewSessionWorkspace}
               newSessionDraftKey={newSessionDraftKey}
               onAgentEnd={handleAgentEnd}
               onAttentionNeeded={handleAttentionNeeded}

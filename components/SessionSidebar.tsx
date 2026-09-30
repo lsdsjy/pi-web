@@ -18,6 +18,7 @@ import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { SessionSearch } from "./SessionSearch";
+import { OPEN_WORKSPACE_PICKER_EVENT } from "./NewSessionWorkspacePicker";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -1177,9 +1178,18 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [recentProjects, selectedProject]);
 
   useEffect(() => {
-    registerWorkspaceSelectorHandler(openProjectDropdown);
+    registerWorkspaceSelectorHandler(activityView
+      ? () => {
+          // The picker lives on the new-session page in the activity view:
+          // open that page first (it remounts the chat), then the picker.
+          handleNewSession();
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            window.dispatchEvent(new Event(OPEN_WORKSPACE_PICKER_EVENT));
+          }));
+        }
+      : openProjectDropdown);
     return () => registerWorkspaceSelectorHandler(null);
-  }, [openProjectDropdown]);
+  }, [activityView, handleNewSession, openProjectDropdown]);
 
   const selectProject = useCallback((project: RecentProject) => {
     setSelectedCwd(project.root);
@@ -1339,7 +1349,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: activityView && !sessionSearchOpen ? 0 : 10 }}>
           <PiWebTitle />
           <div style={{ display: "flex", gap: 6 }}>
             <button
@@ -1413,7 +1423,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           </div>
         </div>
 
-        {/* CWD picker */}
+        {/* CWD picker. The activity view spans every workspace, so there the
+            new-session page picks the workspace instead. */}
+        {!activityView && (
         <div ref={dropdownRef} style={{ position: "relative" }}>
           <button
             onClick={() => (dropdownOpen ? closeProjectDropdown() : openProjectDropdown())}
@@ -1622,6 +1634,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               </button>
           </AnimatedDropdown>
         </div>
+        )}
 
         {sessionSearchOpen && (
           <input
@@ -1650,7 +1663,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             switching between worktrees of one project keeps the row mounted
             instead of flickering while data refetches: all worktrees of a
             project share the same list anyway. */}
-        {!sessionSearchOpen && showWorktreeSwitcher && (() => {
+        {!sessionSearchOpen && !activityView && showWorktreeSwitcher && (() => {
           if (!worktreeState) return null;
           const showWtFilter = worktreeState.worktrees.length >= 8;
           const visibleWorktrees = showWtFilter && wtFilter.trim()
@@ -1958,7 +1971,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             </div>
           );
         })()}
-        {!sessionSearchOpen && inactiveWorktreeSelector && (
+        {!sessionSearchOpen && !activityView && inactiveWorktreeSelector && (
           <button
             type="button"
             aria-disabled="true"

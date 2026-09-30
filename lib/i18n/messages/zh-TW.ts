@@ -310,6 +310,7 @@ export const zhTWLocale: LocalePlugin = {
     "files.checking": "正在檢查檔案",
     "files.uploading": "正在上傳，{progress}%",
     "chat.loadingSession": "正在載入工作階段...",
+    "chat.newSessionWorkspace": "新工作階段將建立在",
     "chat.runningTool": "正在執行工具...",
     "chat.generatingToolInput": "正在產生參數...",
     "chat.truncatedByOutputLimit": "回覆因達到模型輸出長度上限而被截斷。傳送一則後續訊息以繼續。",
