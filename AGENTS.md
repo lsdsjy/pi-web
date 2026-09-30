@@ -81,6 +81,7 @@ app/api/
   plugins/check/route.ts          POST check plugin package updates
   project-trust/route.ts          GET/POST project trust for package installs
   sessions/search/route.ts        GET session search
+  sessions/pinned/route.ts        GET/PUT pinned session ids (~/.pi/agent/pi-web/pinned-sessions.json)
   sessions/[id]/state/route.ts    GET live wrapper state when the session is running
   sessions/[id]/auto-name/route.ts POST generate a session title
   terminal/route.ts               POST create a terminal session
@@ -108,6 +109,8 @@ lib/
   node-cli.ts          locate bundled npm-cli.js / npx-cli.js so npm/npx spawn without a shell (Windows npm.cmd)
   npx.ts               npx runner used by skill install
   plugin-updates.ts    npm view update checks for /api/plugins/check
+  pinned-sessions.ts   pure pin/unpin, validation, and pinned-vs-rest split for the sidebar
+  pinned-sessions-store.ts  read/write ~/.pi/agent/pi-web/pinned-sessions.json
   pi-types.ts          local structural types for pi SDK objects
   rpc-manager.ts      AgentSessionWrapper + registry + startRpcSession
   session-reader.ts   SessionManager wrappers + path cache + buildSessionContext adapter
