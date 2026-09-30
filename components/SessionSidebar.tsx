@@ -2,7 +2,8 @@
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
-import { listSessionFamilies } from "@/lib/session-family";
+import { listSessionFamilies, type SessionFamily } from "@/lib/session-family";
+import { groupByActivity, layoutActivityRows, visibleActivityRowIndices, type ActivityBucket } from "@/lib/activity-groups";
 import { loadExplorerOpen, saveExplorerOpen } from "@/lib/file-explorer-state";
 import { dispatchSessionRowContextMenu } from "@/lib/session-row-context-menu";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -170,6 +171,43 @@ interface ValidatedProject {
 }
 
 const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
+const ACTIVITY_VIEW_STORAGE_KEY = "pi-web:sidebar-activity-view";
+const ACTIVITY_HEADER_HEIGHT = 28;
+const ACTIVITY_CLOCK_TICK_MS = 60_000;
+
+function loadActivityView(): boolean {
+  try {
+    return localStorage.getItem(ACTIVITY_VIEW_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function saveActivityView(enabled: boolean): void {
+  try {
+    localStorage.setItem(ACTIVITY_VIEW_STORAGE_KEY, enabled ? "1" : "0");
+  } catch {
+    // Storage may be unavailable (private mode); the toggle still works in memory.
+  }
+}
+
+function activityBucketLabel(bucket: ActivityBucket, locale: string, t: (key: string) => string): string {
+  switch (bucket.kind) {
+    case "today": return t("sidebar.activityToday");
+    case "yesterday": return t("sidebar.activityYesterday");
+    case "dayBeforeYesterday": return t("sidebar.activityDayBeforeYesterday");
+    case "thisWeek": return t("sidebar.activityThisWeek");
+    case "last30Days": return t("sidebar.activityLast30Days");
+    case "month":
+      return new Intl.DateTimeFormat(locale, { year: "numeric", month: "long" })
+        .format(new Date(bucket.year, bucket.month, 1));
+  }
+}
+
+function projectLabelOf(session: SessionInfo): string {
+  const root = (session.projectRoot ?? session.cwd ?? "").replace(/[\\/]+$/, "");
+  return root.split(/[\\/]/).pop() || root;
+}
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
 const SESSION_DETAILS_HYDRATION_DELAY_MS = 750;
@@ -387,7 +425,7 @@ function PiWebTitle() {
 }
 
 export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onFocusComposer }: Props) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
   // Tracked in a ref only: the version is compared against the polled value to
   // decide whether the list needs reloading, and no render reads it.
@@ -427,6 +465,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [sessionSearchQuery, setSessionSearchQuery] = useState("");
   const sessionSearchActive = sessionSearchOpen && Boolean(sessionSearchQuery.trim());
+  const [activityView, setActivityView] = useState(false);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
   const [changesCount, setChangesCount] = useState(0);
   const [changesCollapsed, setChangesCollapsed] = useState(true);
   const [explorerRefreshDone, setExplorerRefreshDone] = useState(false);
@@ -590,7 +630,16 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // preference after hydration so a collapsed explorer stays collapsed on reload.
   useEffect(() => {
     setExplorerOpen(loadExplorerOpen());
+    setActivityView(loadActivityView());
   }, []);
+
+  // Re-bucket the activity view as the clock moves (e.g. across midnight).
+  useEffect(() => {
+    if (!activityView) return;
+    setActivityNow(Date.now());
+    const timer = setInterval(() => setActivityNow(Date.now()), ACTIVITY_CLOCK_TICK_MS);
+    return () => clearInterval(timer);
+  }, [activityView]);
 
   // Persist unread markers so they survive a browser refresh before the user
   // has actually opened the completed session.
@@ -1217,6 +1266,41 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const sessionFamilies = useMemo(() => listSessionFamilies(filteredSessions), [filteredSessions]);
 
+  // Activity view: every workspace's sessions, newest first, grouped by day.
+  const activityLayout = useMemo(() => {
+    if (!activityView) return { rows: [], totalHeight: 0 };
+    const groups = groupByActivity(
+      listSessionFamilies(allSessions),
+      (family: SessionFamily) => family.latestModified,
+      new Date(activityNow),
+    );
+    return layoutActivityRows(groups, (family) => family.root.id, ACTIVITY_HEADER_HEIGHT, SESSION_LIST_ITEM_HEIGHT);
+  }, [activityView, allSessions, activityNow]);
+
+  const activityIndices = useMemo(() => {
+    if (!activityView) return [];
+    const indices = visibleActivityRowIndices(activityLayout.rows, listScrollTop, listViewportH);
+    // Keep a focused row (e.g. rename input) mounted while scrolled away.
+    const focusedIndex = focusedSessionId
+      ? activityLayout.rows.findIndex((row) => row.type === "item" && row.key === focusedSessionId)
+      : -1;
+    if (focusedIndex >= 0 && !indices.includes(focusedIndex)) {
+      indices.push(focusedIndex);
+      indices.sort((a, b) => a - b);
+    }
+    return indices;
+  }, [activityView, activityLayout, focusedSessionId, listScrollTop, listViewportH]);
+
+  const toggleActivityView = useCallback(() => {
+    setActivityView((current) => {
+      const next = !current;
+      saveActivityView(next);
+      return next;
+    });
+    if (listScrollRef.current) listScrollRef.current.scrollTop = 0;
+  }, []);
+  const activityViewLabel = t("sidebar.toggleActivityView");
+
   const virtualIndices = useMemo(() => getSessionListIndices(
     sessionFamilies.length,
     listScrollTop,
@@ -1259,6 +1343,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <PiWebTitle />
           <div style={{ display: "flex", gap: 6 }}>
             <button
+              className="sidebar-new-button"
               onClick={handleNewSession}
               disabled={!selectedCwd}
               style={{
@@ -1295,7 +1380,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                 <line x1="6" y1="1" x2="6" y2="11" />
                 <line x1="1" y1="6" x2="11" y2="6" />
               </svg>
-              {t("sidebar.new")}
+              <span className="sidebar-new-label">{t("sidebar.new")}</span>
+            </button>
+            <button
+              type="button"
+              onClick={toggleActivityView}
+              title={activityViewLabel}
+              aria-label={activityViewLabel}
+              aria-pressed={activityView}
+              className={`flex h-[32px] w-[32px] shrink-0 cursor-pointer items-center justify-center rounded-[7px] border border-border hover:bg-bg-selected focus-visible:outline-2 focus-visible:outline-accent ${activityView ? "bg-bg-selected text-accent" : "bg-bg-hover text-text-muted"}`}
+            >
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" />
+              </svg>
             </button>
             <button
               type="button"
@@ -1934,12 +2031,72 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
             {error}
           </div>
         )}
-        {!loading && !error && sessionFamilies.length === 0 && (
+        {!loading && !error && (activityView ? activityLayout.rows.length === 0 : sessionFamilies.length === 0) && (
           <div style={{ padding: "16px 14px", color: "var(--text-muted)", fontSize: 12 }}>
             {t("sidebar.noSessions")}
           </div>
         )}
-        {sessionFamilies.length > 0 && (
+        {activityView && activityLayout.rows.length > 0 && (
+          <div style={{ position: "relative", height: activityLayout.totalHeight }}>
+            {activityIndices.map((index) => {
+              const row = activityLayout.rows[index];
+              if (row.type === "header") {
+                return (
+                  <div
+                    key={row.key}
+                    role="heading"
+                    aria-level={3}
+                    style={{
+                      position: "absolute",
+                      top: row.top,
+                      left: 0,
+                      right: 0,
+                      height: row.height,
+                      display: "flex",
+                      alignItems: "flex-end",
+                      padding: "0 12px 5px 16px",
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: "var(--text-muted)",
+                      borderTop: row.top > 0 ? "1px solid var(--border)" : undefined,
+                      boxSizing: "border-box",
+                    }}
+                  >
+                    <span>{activityBucketLabel(row.bucket, locale, t)}</span>
+                  </div>
+                );
+              }
+              const family = row.item;
+              const familySessions = [family.root, ...family.subagents];
+              const displaySession = family.latestModified === family.root.modified
+                ? family.root
+                : { ...family.root, modified: family.latestModified };
+              return (
+                <div
+                  key={row.key}
+                  onFocus={() => setFocusedSessionId(family.root.id)}
+                  onBlur={() => setFocusedSessionId(null)}
+                  style={{ position: "absolute", top: row.top, left: 0, right: 0 }}
+                >
+                  <SessionItem
+                    session={displaySession}
+                    projectLabel={projectLabelOf(family.root)}
+                    isSelected={familySessions.some((session) => session.id === selectedSessionId)}
+                    isRunning={familySessions.some((session) => runningSessionIds.has(session.id))}
+                    isUnread={familySessions.some((session) => unreadSessionIds.has(session.id))}
+                    onClick={() => handleSelectSessionFromList(family.root)}
+                    onRenamed={loadSessions}
+                    onDeleted={(id) => {
+                      onSessionDeleted?.(id);
+                      loadSessions();
+                    }}
+                  />
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {!activityView && sessionFamilies.length > 0 && (
           <div
             style={{
               position: "relative",
@@ -2259,6 +2416,7 @@ function showProjectActivity(
 
 function SessionItem({
   session,
+  projectLabel,
   isSelected,
   isRunning,
   isUnread,
@@ -2271,6 +2429,8 @@ function SessionItem({
   onToggleCollapse,
 }: {
   session: SessionInfo;
+  /** Workspace name shown in the activity view, where rows mix workspaces. */
+  projectLabel?: string;
   isSelected: boolean;
   isRunning?: boolean;
   isUnread?: boolean;
@@ -2386,6 +2546,7 @@ function SessionItem({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
       style={{
+        position: "relative",
         height: SESSION_LIST_ITEM_HEIGHT,
         display: "flex",
         alignItems: "center",
@@ -2508,6 +2669,17 @@ function SessionItem({
               <span>
                 {session.detailsPending ? "…" : t("sidebar.messagesCount", { count: session.messageCount })}
               </span>
+              {projectLabel && (
+                <span
+                  title={session.projectRoot ?? session.cwd}
+                  style={{ display: "flex", alignItems: "center", gap: 3, minWidth: 0, overflow: "hidden", color: "var(--text-muted)" }}
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+                    <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                  </svg>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{projectLabel}</span>
+                </span>
+              )}
               {session.isWorktree && session.branch && (
                 <span
                   title={`Worktree: ${session.cwd}`}
@@ -2547,7 +2719,22 @@ function SessionItem({
 
           {/* Action buttons — shown on hover */}
           {hovered && !session.transient && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <div
+              style={{
+                position: "absolute",
+                top: 0,
+                bottom: 0,
+                right: 0,
+                display: "flex",
+                alignItems: "center",
+                gap: 4,
+                paddingLeft: 18,
+                paddingRight: 8,
+                // Overlay the row instead of taking flex space, fading the
+                // title underneath into the row background.
+                background: `linear-gradient(to right, transparent, ${isSelected ? "var(--bg-selected)" : "var(--bg-hover)"} 16px)`,
+              }}
+            >
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}
