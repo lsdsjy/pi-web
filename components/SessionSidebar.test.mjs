@@ -102,10 +102,12 @@ test("formats session timestamps with the active locale", () => {
   assert.match(sessionItemSource, /formatRelativeTime\(session\.modified, locale\)/);
 });
 
-test("does not persist an unchanged fallback title ending in whitespace", () => {
+test("renaming lives in the top bar and does not persist an unchanged fallback title", async () => {
+  const renameSource = await readFile(new URL("./SessionRenameButton.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(sessionItemSource, /startRename|renaming/);
   assert.match(
-    sessionItemSource,
-    /const name = renameValue\.trim\(\);[\s\S]*?if \(renameValue === title \|\| name === \(session\.name \?\? ""\)\) return;/,
+    renameSource,
+    /const name = value\.trim\(\);[\s\S]*?if \(name === \(session\.name \?\? ""\) \|\| \(!session\.name && value === sessionDisplayTitle\(session\)\)\)/,
   );
 });
 
@@ -113,7 +115,7 @@ test("offers the downstream context-menu hook only on a normal session row", () 
   assert.match(sessionItemSource, /const handleContextMenu[\s\S]*?dispatchSessionRowContextMenu\(\{/);
   assert.match(
     sessionItemSource,
-    /onContextMenu=\{confirmDelete \|\| renaming \? undefined : handleContextMenu\}/,
+    /onContextMenu=\{confirmDelete \? undefined : handleContextMenu\}/,
   );
 });
 

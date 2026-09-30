@@ -56,6 +56,7 @@ import {
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { getRecentProjects } from "@/lib/project-groups";
+import { SessionRenameButton } from "./SessionRenameButton";
 import type { ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
@@ -417,6 +418,8 @@ export function AppShell() {
     const handlePointerDown = (event: PointerEvent) => {
       const toolbar = mobileToolbarRef.current;
       if (toolbar && event.composedPath().includes(toolbar)) return;
+      // Popovers opened from a toolbar action are portaled out of the toolbar.
+      if (event.target instanceof Element && event.target.closest("[data-toolbar-popover]")) return;
       setMobileToolbarMoreOpen(false);
     };
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -983,6 +986,13 @@ export function AppShell() {
     setAutoNameStatus({ kind: "idle" });
   }, [selectedSession?.id]);
 
+  // Rename from the top bar. An empty name clears the stored title.
+  const handleSessionRenamed = useCallback((sessionId: string, name: string) => {
+    setRefreshKey((key) => key + 1);
+    setSelectedSession((current) => current?.id === sessionId ? { ...current, name: name || undefined } : current);
+    setSessionStats((current) => current?.sessionId === sessionId ? { ...current, sessionName: name || undefined } : current);
+  }, []);
+
   const handleExplorerRefresh = useCallback(() => {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
@@ -1392,6 +1402,7 @@ export function AppShell() {
           </svg>
           {!mobile && <span>{translate("history.label")}</span>}
         </button>
+        <SessionRenameButton session={selectedSession} mobile={mobile} onRenamed={handleSessionRenamed} />
         {(() => {
           // 上下文压缩后当前消息可能不再包含 user 消息，需同时参考会话文件的消息总数。
           const hasMessages = Boolean(
