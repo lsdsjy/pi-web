@@ -76,6 +76,43 @@ test("list versions expose idle session creation, rename and deletion to other w
   assert.equal((await (await getRunningSessions()).json()).sessionListVersion, deleted.sessionListVersion);
 });
 
+test("archiving moves the session file into sessions-archive instead of deleting it", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-archive-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  invalidateSessionListCache();
+  let sessionId;
+  t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (sessionId) invalidateSessionPathCache(sessionId);
+    invalidateSessionListCache();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const manager = SessionManager.create(dir);
+  manager.appendMessage({ role: "user", content: "Archive me", timestamp: Date.now() });
+  manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "ok" }], timestamp: Date.now() });
+  sessionId = manager.getSessionId();
+  const originalPath = manager.getSessionFile();
+  const originalText = await readFile(originalPath, "utf8");
+  invalidateSessionListCache();
+
+  const response = await deleteSession(
+    new Request(`http://localhost/api/sessions/${sessionId}?archive=1`, { method: "DELETE" }),
+    { params: Promise.resolve({ id: sessionId }) },
+  );
+  assert.equal(response.status, 200);
+  const { archivedPaths } = await response.json();
+  const archivedPath = archivedPaths[sessionId];
+  assert.ok(archivedPath.startsWith(join(dir, "sessions-archive")), archivedPath);
+  assert.equal(await readFile(archivedPath, "utf8"), originalText, "archived file is moved unchanged");
+  await assert.rejects(readFile(originalPath, "utf8"), { code: "ENOENT" });
+
+  const listed = await (await getSessionList(new Request("http://localhost/api/sessions"))).json();
+  assert.deepEqual(listed.sessions, [], "archived sessions leave the list");
+});
+
 test("session listing returns a gzip-compressed response when the client accepts it", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-list-gzip-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

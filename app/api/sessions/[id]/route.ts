@@ -25,6 +25,7 @@ import type { SessionEntry } from "@/lib/types";
 import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } from "@/lib/subagents";
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
+import { moveSessionToArchive } from "@/lib/session-archive";
 
 export async function GET(
   req: Request,
@@ -197,11 +198,16 @@ export async function PATCH(
 }
 
 // DELETE /api/sessions/[id]
+// DELETE removes a session and every subagent session below it.
+// `?archive=1` moves those files to ~/.pi/agent/sessions-archive/ instead of
+// deleting them, and leaves forks' parent links untouched so a restored
+// session (moved back by hand) keeps its relations.
 export async function DELETE(
-  _req: Request,
+  req: Request,
   { params }: { params: Promise<{ id: string }> }
 ) {
   const { id } = await params;
+  const archive = new URL(req.url).searchParams.get("archive") === "1";
   try {
     const filePath = await resolveSessionPath(id);
     if (!filePath) {
@@ -289,8 +295,10 @@ export async function DELETE(
     const deletedPathKeys = new Set([...deletedPaths.values()].map((path) => sessionPathKey(path)));
 
     // Re-attach all direct children to this session's parent (cascade re-parent)
-    // Scan sibling files in the same directory
-    try {
+    // Scan sibling files in the same directory. Archiving skips this: the
+    // parent file still exists (in the archive), and a dangling parent link is
+    // already read as "no parent".
+    if (!archive) try {
       const files = readdirSync(dir).filter(
         (file) => file.endsWith(".jsonl") && sessionPathKey(join(dir, file)) !== targetPathKey,
       );
@@ -346,9 +354,11 @@ export async function DELETE(
     }
     try { await abortSubagent(id); } catch { /* ordinary session */ }
     await getRpcSession(id)?.shutdown();
+    const archivedPaths: Record<string, string> = {};
     for (const [deletedId, deletedPath] of deletedPaths) {
       try {
-        unlinkSync(deletedPath);
+        if (archive) archivedPaths[deletedId] = moveSessionToArchive(deletedPath);
+        else unlinkSync(deletedPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
@@ -356,7 +366,7 @@ export async function DELETE(
       invalidateSessionManagerCache(deletedPath);
     }
     invalidateSessionListCache();
-    return NextResponse.json({ ok: true });
+    return NextResponse.json(archive ? { ok: true, archivedPaths } : { ok: true });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
