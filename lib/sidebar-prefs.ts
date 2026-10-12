@@ -1,7 +1,8 @@
 /**
  * Per-browser sidebar preferences: the active tab (sessions or files), the
  * user's explicit project group expand/collapse choices, whether the pinned
- * section is collapsed, whether the files section below the sessions is
+ * section is collapsed, whether the sessions show as the activity view
+ * rather than project groups, whether the files section below the sessions is
  * collapsed, whether the files tab or section lists ignored files, and the
  * folders the worktree listing last found outside git.
  * Best-effort localStorage, like the other sidebar memories: privacy mode or
@@ -18,6 +19,8 @@ const GROUP_EXPANSION_STORAGE_KEY = "pi-web:sidebar-groups-v2";
  */
 const LEGACY_GROUP_EXPANSION_STORAGE_KEY = "pi-web:sidebar-groups";
 const PINNED_COLLAPSED_STORAGE_KEY = "pi-web:sidebar-pins-collapsed";
+/** Kept from the old sidebar's activity view, so its choice carries over: "1" on. */
+const ACTIVITY_VIEW_STORAGE_KEY = "pi-web:sidebar-activity-view";
 const SHOW_IGNORED_FILES_STORAGE_KEY = "pi-web:sidebar-files-show-ignored";
 const FILES_COLLAPSED_STORAGE_KEY = "pi-web:sidebar-files-collapsed";
 const NON_GIT_CWDS_STORAGE_KEY = "pi-web:sidebar-non-git-cwds";
@@ -144,6 +147,27 @@ export function savePinnedCollapsed(
   if (!storage) return;
   try {
     storage.setItem(PINNED_COLLAPSED_STORAGE_KEY, String(collapsed));
+  } catch {
+    // Persistence is best-effort.
+  }
+}
+
+export function loadActivityView(storage: StorageLike | null = getBrowserStorage()): boolean {
+  if (!storage) return false;
+  try {
+    return storage.getItem(ACTIVITY_VIEW_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+export function saveActivityView(
+  enabled: boolean,
+  storage: StorageLike | null = getBrowserStorage(),
+): void {
+  if (!storage) return;
+  try {
+    storage.setItem(ACTIVITY_VIEW_STORAGE_KEY, enabled ? "1" : "0");
   } catch {
     // Persistence is best-effort.
   }

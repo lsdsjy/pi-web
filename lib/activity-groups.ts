@@ -1,7 +1,7 @@
 /**
- * Cross-workspace activity view: buckets items by local calendar day of their
- * latest activity (today / yesterday / the day before / earlier this week /
- * last 30 days / one bucket per older month).
+ * The sidebar's activity view (lib/session-tree.ts): buckets items by local
+ * calendar day of their latest activity (today / yesterday / the day before /
+ * earlier this week / last 30 days / one bucket per older month).
  */
 
 export type ActivityBucket =
@@ -39,7 +39,8 @@ export function activityBucketFor(date: Date, now: Date): ActivityBucket {
   return { kind: "month", year: date.getFullYear(), month: date.getMonth() };
 }
 
-function bucketKey(bucket: ActivityBucket): string {
+/** A bucket's stable key: its kind, or the month for older ones. */
+export function activityBucketKey(bucket: ActivityBucket): string {
   return bucket.kind === "month" ? `month:${bucket.year}-${bucket.month}` : bucket.kind;
 }
 
@@ -61,87 +62,10 @@ export function groupByActivity<T>(
   const groups: ActivityGroup<T>[] = [];
   for (const { item, time } of withTime) {
     const bucket = activityBucketFor(new Date(time), now);
-    const key = bucketKey(bucket);
+    const key = activityBucketKey(bucket);
     const last = groups[groups.length - 1];
     if (last?.key === key) last.items.push(item);
     else groups.push({ key, bucket, items: [item] });
   }
   return groups;
-}
-
-/** A run of list rows, optionally introduced by a header row. */
-export interface RowGroup<T, H> {
-  key: string;
-  header: H | null;
-  /** Overrides the layout's header height for this group's header. */
-  headerHeight?: number;
-  items: readonly T[];
-}
-
-export type ListRow<T, H> =
-  | { type: "header"; key: string; header: H; top: number; height: number }
-  | { type: "item"; key: string; item: T; top: number; height: number };
-
-/**
- * Flattens groups into positioned rows for a variable-height virtual list.
- * Item keys must be unique across all groups; header keys are `h:<group key>`.
- */
-export function layoutGroupedRows<T, H>(
-  groups: readonly RowGroup<T, H>[],
-  itemKey: (item: T) => string,
-  headerHeight: number,
-  itemHeight: number,
-): { rows: ListRow<T, H>[]; totalHeight: number } {
-  const rows: ListRow<T, H>[] = [];
-  let top = 0;
-  for (const group of groups) {
-    if (group.header !== null) {
-      const height = group.headerHeight ?? headerHeight;
-      rows.push({ type: "header", key: `h:${group.key}`, header: group.header, top, height });
-      top += height;
-    }
-    for (const item of group.items) {
-      rows.push({ type: "item", key: itemKey(item), item, top, height: itemHeight });
-      top += itemHeight;
-    }
-  }
-  return { rows, totalHeight: top };
-}
-
-/** Indices of rows intersecting the viewport plus an overscan margin. */
-export function visibleActivityRowIndices(
-  rows: readonly { top: number; height: number }[],
-  scrollTop: number,
-  viewportHeight: number,
-  overscan = 400,
-): number[] {
-  const from = scrollTop - overscan;
-  // Before the viewport is measured, fall back to a reasonable window.
-  const to = scrollTop + (viewportHeight > 0 ? viewportHeight : 1200) + overscan;
-  const indices: number[] = [];
-  for (let index = 0; index < rows.length; index++) {
-    const row = rows[index];
-    if (row.top + row.height < from) continue;
-    if (row.top > to) break;
-    indices.push(index);
-  }
-  return indices;
-}
-
-/**
- * Visible row indices, plus the row keyed `keepKey` (e.g. one holding an
- * inline rename input) even while it is scrolled out of the window.
- */
-export function visibleListRowIndices(
-  rows: readonly { key: string; top: number; height: number }[],
-  scrollTop: number,
-  viewportHeight: number,
-  keepKey: string | null = null,
-): number[] {
-  const indices = visibleActivityRowIndices(rows, scrollTop, viewportHeight);
-  if (keepKey === null) return indices;
-  const keepIndex = rows.findIndex((row) => row.key === keepKey);
-  if (keepIndex < 0 || indices.includes(keepIndex)) return indices;
-  indices.push(keepIndex);
-  return indices.sort((a, b) => a - b);
 }

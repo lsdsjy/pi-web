@@ -1082,6 +1082,11 @@ a.session-tree-main {
   padding: 0;
 }
 
+/* The activity view's toggle after the search: a line parts the two cells. */
+.sidebar-search-toggle + .sidebar-search-toggle {
+  border-left: 1px solid var(--border);
+}
+
 .sidebar-new-button:disabled {
   color: var(--text-dim);
   cursor: not-allowed;

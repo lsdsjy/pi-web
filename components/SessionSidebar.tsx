@@ -29,6 +29,7 @@ import {
 } from "@/lib/session-tree";
 import {
   forgetRetiredSidebarKeys,
+  loadActivityView,
   loadFilesCollapsed,
   loadGroupExpansion,
   loadNonGitCwds,
@@ -36,6 +37,7 @@ import {
   loadShowIgnoredFiles,
   loadSidebarTab,
   rememberCwdGitStatus,
+  saveActivityView,
   saveFilesCollapsed,
   saveGroupExpansion,
   savePinnedCollapsed,
@@ -107,6 +109,7 @@ import {
   RefreshIcon,
   RestoreIcon,
   SearchIcon,
+  ClockIcon,
   TerminalIcon,
   TrashIcon,
   UploadIcon,
@@ -291,6 +294,7 @@ const UNREAD_SESSIONS_STORAGE_KEY = "pi-web:unread-session-ids";
 const LAST_CUSTOM_CWD_STORAGE_KEY = "pi-web:last-custom-cwd";
 const RUNNING_SESSIONS_POLL_MS = 2500;
 const SESSION_DETAILS_HYDRATION_DELAY_MS = 750;
+const ACTIVITY_CLOCK_TICK_MS = 60_000;
 /** "Archive sessions older than 7 days" in a project's menu. */
 const ARCHIVE_OLDER_THAN_MS = 7 * 24 * 60 * 60 * 1000;
 const TOAST_TITLE_MAX = 28;
@@ -563,6 +567,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const [keptOpenGroups, setKeptOpenGroups] = useState<ReadonlySet<string>>(() => new Set());
   const [moreShown, setMoreShown] = useState<Readonly<Record<string, number>>>({});
   const [pinnedCollapsed, setPinnedCollapsed] = useState(false);
+  // The activity view: every project's sessions by day instead of project
+  // groups. Its clock moves each minute, so the buckets follow midnight.
+  const [activityView, setActivityView] = useState(false);
+  const [activityNow, setActivityNow] = useState(() => Date.now());
   const [archiveView, setArchiveViewState] = useState(false);
   // The fold and the archive view move (hooks/useSidebarMotion.ts): only
   // when the user folds or goes in or out, never on a restore, a drag, keys,
@@ -710,6 +718,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     const groups = loadGroupExpansion();
     if (Object.keys(groups).length > 0) setGroupExpansion(groups);
     if (loadPinnedCollapsed()) setPinnedCollapsed(true);
+    if (loadActivityView()) setActivityView(true);
     if (loadFilesCollapsed()) setFilesCollapsed(true);
     if (loadShowIgnoredFiles()) setShowIgnoredFiles(true);
     forgetRetiredSidebarKeys();
@@ -1408,7 +1417,20 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     groupExpansion: shownGroupExpansion,
     moreShown,
     pinnedCollapsed,
-  }), [allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId, currentProject, shownGroupExpansion, moreShown, pinnedCollapsed]);
+    activityNow: activityView ? activityNow : null,
+  }), [allSessions, uiState, runningSessionIds, awaitingInputSessionIds, unreadSessionIds, selectedSessionId, currentProject, shownGroupExpansion, moreShown, pinnedCollapsed, activityView, activityNow]);
+
+  useEffect(() => {
+    if (!activityView) return;
+    setActivityNow(Date.now());
+    const timer = setInterval(() => setActivityNow(Date.now()), ACTIVITY_CLOCK_TICK_MS);
+    return () => clearInterval(timer);
+  }, [activityView]);
+  const toggleActivityView = useCallback(() => {
+    const next = !activityView;
+    setActivityView(next);
+    saveActivityView(next);
+  }, [activityView]);
   // Built while the archive view is rendered, its way out included: it
   // leaves as it was, not empty.
   const archiveMounted = archiveMotion.archiveMounted;
@@ -2649,6 +2671,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
         >
           <SearchIcon size={16} />
         </button>
+        {/* The sessions' view: project groups, or every project's by day. */}
+        {sessionsShown && (
+          <button
+            type="button"
+            onClick={toggleActivityView}
+            title={t("sidebar.toggleActivityView")}
+            aria-label={t("sidebar.toggleActivityView")}
+            aria-pressed={activityView}
+            className={`sidebar-search-toggle${activityView ? " is-active" : ""}`}
+          >
+            <ClockIcon size={16} />
+          </button>
+        )}
       </div>
 
       {/* Sessions: every project's sessions, or the archive. A tab's panel,

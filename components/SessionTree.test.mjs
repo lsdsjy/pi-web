@@ -530,11 +530,12 @@ test("headers lead with their chevron, and every row's text starts in one column
   // No layout overrides these paddings, so phones line up the same way.
   assert.doesNotMatch(css, /\.is-mobile \.session-tree-(?:session|group-toggle|group-empty|more|pinned-toggle|archive-group|footer-button) \{[^}]*padding/);
   // One rhythm: session rows, every header (a project's, the pinned
-  // section's, the archive's projects), the empty note and the footer are
-  // one height, 28px (44px on a phone); only "show more" is shorter.
-  assert.deepEqual(SIDEBAR_ROW_HEIGHTS.desktop, { "pinned-header": 28, session: 28, "pinned-more": 26, group: 28, "group-more": 26, "group-empty": 28, spacer: 8, "footer-open": 28, "footer-archived": 28, "archive-group": 28 });
+  // section's, the archive's projects, the activity view's days), the empty
+  // note and the footer are one height, 28px (44px on a phone); only "show
+  // more" is shorter.
+  assert.deepEqual(SIDEBAR_ROW_HEIGHTS.desktop, { "pinned-header": 28, session: 28, "pinned-more": 26, group: 28, "group-more": 26, "group-empty": 28, spacer: 8, "footer-open": 28, "footer-archived": 28, "archive-group": 28, "activity-header": 28 });
   for (const [layout, height] of [["desktop", 28], ["mobile", 44]]) {
-    for (const kind of ["session", "group", "pinned-header", "group-empty", "footer-open", "footer-archived", "archive-group"]) {
+    for (const kind of ["session", "group", "pinned-header", "group-empty", "footer-open", "footer-archived", "archive-group", "activity-header"]) {
       assert.equal(SIDEBAR_ROW_HEIGHTS[layout][kind], height, `${layout} ${kind}`);
     }
   }
@@ -566,4 +567,17 @@ test("the drag ghost is shorter than a header", () => {
   // its height to keep it clear of the pointer and the line).
   assert.match(cssRule(".session-tree-drag-ghost"), /\n\s*height: 22px;/);
   assert.ok(22 < SIDEBAR_ROW_HEIGHTS.desktop.group, "shorter than a header");
+});
+
+test("the activity view's day headers name their day, and its rows their project", () => {
+  const html = render({
+    rows: [
+      { kind: "activity-header", key: "activity:today", bucket: { kind: "today" } },
+      sessionRow(session("act"), { context: "activity" }),
+      { kind: "activity-header", key: "activity:month:2025-3", bucket: { kind: "month", year: 2025, month: 3 } },
+    ],
+  });
+  assert.match(rowMarkup(html, "activity:today"), /<span class="session-tree-archive-group-name">Today<\/span>/);
+  assert.match(rowMarkup(html, "activity:month:2025-3"), /<span class="session-tree-archive-group-name">April 2025<\/span>/);
+  assert.match(rowMarkup(html, "session:activity:act"), /<span class="session-tree-meta"><span class="session-tree-project">app<\/span><\/span>/);
 });

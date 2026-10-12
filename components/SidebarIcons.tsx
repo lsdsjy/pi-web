@@ -197,6 +197,15 @@ export function SearchIcon(props: SidebarIconProps) {
   );
 }
 
+export function ClockIcon(props: SidebarIconProps) {
+  return (
+    <SidebarIcon {...props}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </SidebarIcon>
+  );
+}
+
 export function UploadIcon(props: SidebarIconProps) {
   return (
     <SidebarIcon {...props}>

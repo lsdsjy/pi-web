@@ -15,8 +15,13 @@
  * Groups keep the stored project order (`projectOrder`): activity never moves
  * a project that has a place in it. Pinned projects come first, then the
  * rest; in each band the projects without a place come first.
+ *
+ * The activity view (`activityNow` set) lists the same live, non-pinned
+ * families without project groups: every project's together, newest first,
+ * under a header per local calendar day bucket (lib/activity-groups.ts).
  */
 
+import { activityBucketKey, groupByActivity, type ActivityBucket } from "./activity-groups";
 import { listSessionFamilies, type SessionFamily } from "./session-family";
 import { storedProjectName, type ProjectMovePosition, type SessionUiFamilyState, type SessionUiState } from "./session-ui-state-shared";
 import type { SessionInfo } from "./types";
@@ -25,7 +30,7 @@ import { workspaceKeyOf } from "./workspace-memory";
 export type SidebarLayout = "desktop" | "mobile";
 export type SidebarRowKind =
   | "pinned-header" | "session" | "pinned-more" | "group" | "group-more" | "group-empty"
-  | "spacer" | "footer-open" | "footer-archived" | "archive-group";
+  | "spacer" | "footer-open" | "footer-archived" | "archive-group" | "activity-header";
 
 /**
  * Per-kind row heights: one rhythm. Session rows, the section headers (a
@@ -36,8 +41,8 @@ export type SidebarRowKind =
  * footer; groups themselves sit right on each other, with none between them.
  */
 export const SIDEBAR_ROW_HEIGHTS: Record<SidebarLayout, Record<SidebarRowKind, number>> = {
-  desktop: { "pinned-header": 28, session: 28, "pinned-more": 26, group: 28, "group-more": 26, "group-empty": 28, spacer: 8, "footer-open": 28, "footer-archived": 28, "archive-group": 28 },
-  mobile: { "pinned-header": 44, session: 44, "pinned-more": 36, group: 44, "group-more": 36, "group-empty": 44, spacer: 8, "footer-open": 44, "footer-archived": 44, "archive-group": 44 },
+  desktop: { "pinned-header": 28, session: 28, "pinned-more": 26, group: 28, "group-more": 26, "group-empty": 28, spacer: 8, "footer-open": 28, "footer-archived": 28, "archive-group": 28, "activity-header": 28 },
+  mobile: { "pinned-header": 44, session: 44, "pinned-more": 36, group: 44, "group-more": 36, "group-empty": 44, spacer: 8, "footer-open": 44, "footer-archived": 44, "archive-group": 44, "activity-header": 44 },
 };
 export const GROUP_VISIBLE_LIMIT = 6;
 export const PINNED_VISIBLE_LIMIT = 8;
@@ -53,9 +58,12 @@ export const PINNED_MORE_KEY = "pinned";
 export interface SidebarProject { key: string; root: string; name: string; customName: string | null; pinned: boolean; current: boolean }
 export interface SidebarFamilyStatus { running: boolean; awaiting: boolean; unread: boolean; selected: boolean; transient: boolean }
 
+/** Where a session row is listed: its menu and its meta (time or project name) follow from it. */
+export type SessionRowContext = "pinned" | "group" | "archive" | "activity";
+
 export type SidebarRow =
   | { kind: "pinned-header"; key: "pinned-header"; count: number; collapsed: boolean; running: number; unread: number }
-  | { kind: "session"; key: string; family: SessionFamily; context: "pinned" | "group" | "archive"; project: SidebarProject; status: SidebarFamilyStatus; archivedAt: number | null }
+  | { kind: "session"; key: string; family: SessionFamily; context: SessionRowContext; project: SidebarProject; status: SidebarFamilyStatus; archivedAt: number | null }
   | { kind: "pinned-more"; key: "pinned-more"; hidden: number; canShowLess: boolean; nextShown: number }
   | { kind: "group"; key: string; project: SidebarProject; expanded: boolean; running: number; unread: number }
   | { kind: "group-more"; key: string; projectKey: string; hidden: number; canShowLess: boolean; nextShown: number }
@@ -63,7 +71,8 @@ export type SidebarRow =
   | { kind: "spacer"; key: "pinned-spacer" | "footer-spacer" }
   | { kind: "footer-open"; key: "footer-open" }
   | { kind: "footer-archived"; key: "footer-archived"; count: number }
-  | { kind: "archive-group"; key: string; project: SidebarProject; count: number };
+  | { kind: "archive-group"; key: string; project: SidebarProject; count: number }
+  | { kind: "activity-header"; key: string; bucket: ActivityBucket };
 
 export interface SessionTreeInput {
   /** The full catalog (allSessions), subagents included. */
@@ -84,6 +93,8 @@ export interface SessionTreeInput {
   /** Families revealed beyond the base limit by "show more", per projectKey or PINNED_MORE_KEY. */
   moreShown: Readonly<Record<string, number>>;
   pinnedCollapsed: boolean;
+  /** The activity view's clock (ms), which buckets the families by day; null or absent: project groups. */
+  activityNow?: number | null;
 }
 
 export interface SessionTreeModel {
@@ -296,7 +307,7 @@ function createProjectResolver(
 
 function sessionRow(
   family: SessionFamily,
-  context: "pinned" | "group" | "archive",
+  context: SessionRowContext,
   project: SidebarProject,
   input: FamilyFlagsInput,
   archivedAt: number | null,
@@ -509,7 +520,18 @@ export function buildSessionTree(input: SessionTreeInput): SessionTreeModel {
     .filter((project) => !rank.has(project.key) && recordable(project))
     .map((project) => project.key);
 
-  for (const project of orderedProjects) {
+  const activityNow = input.activityNow ?? null;
+  if (activityNow !== null) {
+    const live = [...projectFamilies.values()].flat();
+    for (const bucket of groupByActivity(live, (family) => family.latestModified, new Date(activityNow))) {
+      rows.push({ kind: "activity-header", key: `activity:${activityBucketKey(bucket.bucket)}`, bucket: bucket.bucket });
+      for (const family of bucket.items) {
+        rows.push(sessionRow(family, "activity", resolver.get(familyProjectKey(family)), input, null));
+      }
+    }
+  }
+
+  for (const project of activityNow === null ? orderedProjects : []) {
     const groupFamilies = projectFamilies.get(project.key) ?? [];
     const expanded = isGroupExpanded(project, input.groupExpansion);
     let running = 0;
@@ -535,7 +557,9 @@ export function buildSessionTree(input: SessionTreeInput): SessionTreeModel {
   // Groups sit right on each other, open or folded: a gap between two of
   // them would only push the next header away. One spacer parts them from
   // the footer, as one parts the pinned section from them.
-  if (orderedProjects.length > 0) rows.push({ kind: "spacer", key: "footer-spacer" });
+  if (activityNow === null ? orderedProjects.length > 0 : rows.length > 0 && rows[rows.length - 1].kind !== "spacer") {
+    rows.push({ kind: "spacer", key: "footer-spacer" });
+  }
   rows.push({ kind: "footer-open", key: "footer-open" });
   if (archivedCount > 0) rows.push({ kind: "footer-archived", key: "footer-archived", count: archivedCount });
 

@@ -14,6 +14,7 @@ import {
   type ReactNode,
   type RefObject,
 } from "react";
+import type { ActivityBucket } from "@/lib/activity-groups";
 import type { SessionFamily } from "@/lib/session-family";
 import { splitForkSuffix } from "@/lib/session-fork-name";
 import { MAX_PROJECT_NAME_LENGTH, type ProjectMovePosition } from "@/lib/session-ui-state-shared";
@@ -570,8 +571,9 @@ const SessionRowView = memo(function SessionRowView({
   const tooltip = `${title}\n${details} · ${formatRelativeTime(root.modified, locale, nowDate)}${branch ? ` · ⑂ ${branch}` : ""}`;
 
   // The right column says the one thing worth knowing: awaiting input, else
-  // running, else unread, else when (a pinned row names its project instead, an
-  // archived row says when it was archived). Nothing sits before the title, so it
+  // running, else unread, else when (a pinned row names its project instead, as
+  // an activity row does under its day's header; an archived row says when it
+  // was archived). Nothing sits before the title, so it
   // gets the room.
   let meta: ReactNode;
   let metaState = "";
@@ -591,7 +593,7 @@ const SessionRowView = memo(function SessionRowView({
     meta = <span className="session-tree-unread" role="img" aria-label={t("sidebar.newSessionActivity")} />;
     metaState = " is-unread";
     metaTitle = t("sidebar.newActivity");
-  } else if (context === "pinned") {
+  } else if (context === "pinned" || context === "activity") {
     meta = <span className="session-tree-project">{row.project.name}</span>;
   } else if (context === "archive" && row.archivedAt !== null) {
     meta = formatShortRelativeTime(new Date(row.archivedAt), locale, nowDate);
@@ -953,6 +955,19 @@ const GroupRowView = memo(function GroupRowView({
   );
 });
 
+/** An activity view header's label: a relative day, or the month for older buckets. */
+function activityBucketLabel(bucket: ActivityBucket, locale: string, t: ReturnType<typeof useI18n>["t"]): string {
+  switch (bucket.kind) {
+    case "today": return t("sidebar.activityToday");
+    case "yesterday": return t("sidebar.activityYesterday");
+    case "dayBeforeYesterday": return t("sidebar.activityDayBeforeYesterday");
+    case "thisWeek": return t("sidebar.activityThisWeek");
+    case "last30Days": return t("sidebar.activityLast30Days");
+    case "month":
+      return new Intl.DateTimeFormat(locale, { year: "numeric", month: "long" }).format(new Date(bucket.year, bucket.month, 1));
+  }
+}
+
 /** The rows with at most one control: section headers, "show more", footer links. */
 const PlainRowView = memo(function PlainRowView({
   row,
@@ -967,7 +982,7 @@ const PlainRowView = memo(function PlainRowView({
   handlers: Handlers;
   onMoreAction: (rowKey: string, key: string, action: "more" | "less", button: HTMLElement) => void;
 }) {
-  const { t } = useI18n();
+  const { locale, t } = useI18n();
   const style = rowStyle(top, height);
 
   switch (row.kind) {
@@ -1057,6 +1072,12 @@ const PlainRowView = memo(function PlainRowView({
             <span className="session-tree-footer-label">{t("sidebar.archivedCount", { count: row.count })}</span>
             <ChevronIcon size={10} className="session-tree-footer-chevron" />
           </button>
+        </div>
+      );
+    case "activity-header":
+      return (
+        <div className="session-tree-row session-tree-archive-group" style={style} data-row-key={row.key}>
+          <span className="session-tree-archive-group-name">{activityBucketLabel(row.bucket, locale, t)}</span>
         </div>
       );
     case "archive-group":
