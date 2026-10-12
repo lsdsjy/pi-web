@@ -336,6 +336,7 @@ export const enLocale: LocalePlugin = {
     "sidebar.clearSearch": "Clear search",
     "sidebar.searchSessions": "Search all conversations...",
     "sidebar.toggleSessionSearch": "Search conversations",
+    "sidebar.shortcutHint": "{label} ({shortcut})",
     "sidebar.sessionSearching": "Searching...",
     "sidebar.sessionSearchEmpty": "No matching conversations",
     "sidebar.sessionSearchCount": "{count} matching conversations",

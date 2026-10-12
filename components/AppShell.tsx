@@ -2,10 +2,10 @@
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { registerWorkspaceSelectorHandler, useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar, type SelectSessionOptions, type SessionSidebarControl } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
-import { NewSessionContextBar, type NewSessionContextControl } from "./NewSessionContextBar";
+import { NewSessionContextBar, type NewSessionContextBarHandle, type NewSessionContextControl } from "./NewSessionContextBar";
 import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
@@ -1320,8 +1320,33 @@ export function AppShell() {
   const handleNewSessionBarFocusDone = useCallback(() => {
     newSessionBarFocusRef.current = null;
   }, []);
+  // Cmd/Ctrl+Shift+P: the project menu of the bar above a fresh composer.
+  // From an open session it starts a new one in the active project first, and
+  // the menu opens once that composer's bar has mounted (two frames, as
+  // handleFocusComposer waits, then a few more while ChatWindow commits).
+  const newSessionBarRef = useRef<NewSessionContextBarHandle>(null);
+  const openNewSessionProjectMenu = useCallback(() => {
+    const barShown = selectedSession === null && (newSessionCwd ?? activeCwd) !== null;
+    if (!barShown) {
+      if (!activeCwd) return;
+      handleNewSession(`kb-${Date.now()}`, activeCwd);
+    }
+    let frames = 0;
+    const tryOpen = () => {
+      const bar = newSessionBarRef.current;
+      if (bar && frames >= 2) bar.openProjectMenu();
+      else if (++frames < 12) requestAnimationFrame(tryOpen);
+    };
+    requestAnimationFrame(tryOpen);
+  }, [activeCwd, handleNewSession, newSessionCwd, selectedSession]);
+  useEffect(() => {
+    registerWorkspaceSelectorHandler(openNewSessionProjectMenu);
+    return () => registerWorkspaceSelectorHandler(null);
+  }, [openNewSessionProjectMenu]);
+
   const newSessionContextBar = selectedSession === null && effectiveNewSessionCwd ? (
     <NewSessionContextBar
+      handleRef={newSessionBarRef}
       context={contextForCwd(sidebarNewSessionContext, effectiveNewSessionCwd, newSessionMoveRef.current)}
       mobile={isMobile}
       initialFocus={newSessionBarFocusRef.current}
@@ -1444,6 +1469,7 @@ export function AppShell() {
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
+        onFocusComposer={handleFocusComposer}
       />
       <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([

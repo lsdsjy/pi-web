@@ -72,6 +72,8 @@ import {
 import { focusIfLost, type FocusDocument } from "@/lib/stacked-dialog";
 import { useFilesPlacement } from "@/hooks/useFilesPlacement";
 import { useI18n } from "@/hooks/useI18n";
+import { registerSessionSearchHandler } from "@/hooks/useKeyboardShortcuts";
+import { useShortcutHint, useShortcutKeys } from "@/hooks/useShortcutHint";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
@@ -224,6 +226,8 @@ interface Props {
   onBackgroundTaskDone?: () => void;
   onRunningSessionIdsChange?: (ids: Set<string>) => void;
   onSessionsChange?: (sessions: SessionInfo[]) => void;
+  /** Hands the keyboard to the composer: a "+" is always followed by typing the first prompt. */
+  onFocusComposer?: () => void;
 }
 
 /**
@@ -476,7 +480,7 @@ function buttonAnchor(element: HTMLElement, align: "start" | "end"): SidebarMenu
   return { kind: "rect", rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }, align };
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, controlRef, onNewSessionContextChange, initialSessionId, initialSessionLinked, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, onFocusComposer }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
@@ -1314,7 +1318,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   const handleNewSession = useCallback(() => {
     if (!selectedCwd) return;
     startNewSessionIn({ cwd: selectedCwd });
-  }, [selectedCwd, startNewSessionIn]);
+    onFocusComposer?.();
+  }, [onFocusComposer, selectedCwd, startNewSessionIn]);
 
   const recentProjects = useMemo(() => getRecentProjects(allSessions), [allSessions]);
 
@@ -2058,7 +2063,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       projectKey: project.key,
       projectRoot: project.root,
     });
-  }, [selectedCwd, startNewSessionIn]);
+    onFocusComposer?.();
+  }, [onFocusComposer, selectedCwd, startNewSessionIn]);
 
   const closeMenu = useCallback(() => setMenu(null), []);
 
@@ -2411,6 +2417,29 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // sessions' search alone; the files section's header has the files'.
   const sessionsShown = stacked || sidebarTab === "sessions";
   const searchesFiles = !stacked && sidebarTab === "files" && explorerCwd !== null;
+  // The sessions' search, from the toolbar row's search button or the global
+  // Cmd/Ctrl+K. On the files tab it switches to the sessions tab first.
+  const toggleSessionSearch = useCallback(() => {
+    if (!sessionsShown) {
+      switchTab("sessions");
+      setSessionSearchOpen(true);
+      return;
+    }
+    setSessionSearchOpen((open) => !open);
+  }, [sessionsShown, switchTab]);
+  useEffect(() => {
+    registerSessionSearchHandler(toggleSessionSearch);
+    return () => registerSessionSearchHandler(null);
+  }, [toggleSessionSearch]);
+  // Tooltip hints and `aria-keyshortcuts` for the chords New and the search
+  // button share with the keyboard, resolved on the client for its modifier.
+  const newSessionHint = useShortcutHint("j");
+  const newSessionKeys = useShortcutKeys("j");
+  const sessionSearchHint = useShortcutHint("k");
+  const sessionSearchKeys = useShortcutKeys("k");
+  const withHint = (label: string, hint: string | null) => (
+    hint ? t("sidebar.shortcutHint", { label, shortcut: hint }) : label
+  );
   // What the toolbar row's widths depend on: New's label, and the tabs (the
   // chosen tab's label is bolder, the files tab carries the count). The
   // brand's text reports its own changes (fitHeader).
@@ -2596,7 +2625,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           className="sidebar-new-button"
           onClick={handleNewSession}
           disabled={!selectedCwd}
-          title={selectedCwd ? t("sidebar.newSessionTitle", { path: selectedCwd }) : t("sidebar.selectProject")}
+          title={selectedCwd ? withHint(t("sidebar.newSessionTitle", { path: selectedCwd }), newSessionHint) : t("sidebar.selectProject")}
+          aria-keyshortcuts={selectedCwd ? newSessionKeys ?? undefined : undefined}
         >
           <PlusIcon size={12} />
           <span className="sidebar-new-label">{t("sidebar.new")}</span>
@@ -2611,14 +2641,10 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
               setFileSearchOpen((open) => !open);
               return;
             }
-            if (!sessionsShown) {
-              switchTab("sessions");
-              setSessionSearchOpen(true);
-              return;
-            }
-            setSessionSearchOpen((open) => !open);
+            toggleSessionSearch();
           }}
-          title={searchesFiles ? t("sidebar.searchFiles") : t("sidebar.toggleSessionSearch")}
+          title={searchesFiles ? t("sidebar.searchFiles") : withHint(t("sidebar.toggleSessionSearch"), sessionSearchHint)}
+          aria-keyshortcuts={searchesFiles ? undefined : sessionSearchKeys ?? undefined}
           aria-label={searchesFiles ? t("sidebar.searchFiles") : t("sidebar.toggleSessionSearch")}
           aria-expanded={searchesFiles ? fileSearchOpen : sessionSearchOpen}
           aria-controls={searchesFiles ? "file-search-input" : "session-search-input"}

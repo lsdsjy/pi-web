@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type Ref } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import type { NewSessionContext, NewSessionTarget, ProjectChoice } from "@/lib/new-session-context";
 import { focusIfLost } from "@/lib/stacked-dialog";
@@ -8,6 +8,11 @@ import { ProjectWorktreePicker, type ProjectWorktreeControl, type ProjectWorktre
 
 /** The bar's two controls. A move names the one it came from, which takes focus in the bar that replaces this one. */
 export type NewSessionContextControl = ProjectWorktreeControl;
+
+/** What the shell does to the bar from outside it: the global Cmd/Ctrl+Shift+P. */
+export interface NewSessionContextBarHandle {
+  openProjectMenu(): void;
+}
 
 interface Props {
   context: NewSessionContext;
@@ -24,6 +29,7 @@ interface Props {
   onOpenFolder: (opener: HTMLElement | null) => void;
   onRefreshWorktrees: () => void;
   onCreateWorktree: (project: ProjectChoice, branch: string) => Promise<{ path: string } | { error: string }>;
+  handleRef?: Ref<NewSessionContextBarHandle>;
 }
 
 // The home folder the paths (the menus', a detached checkout's in the
@@ -65,10 +71,14 @@ export function NewSessionContextBar({
   onOpenFolder,
   onRefreshWorktrees,
   onCreateWorktree,
+  handleRef,
 }: Props) {
   const { t } = useI18n();
   const [homeDir, setHomeDir] = useState(() => homeDirFound);
   const pickerRef = useRef<ProjectWorktreePickerHandle>(null);
+  useImperativeHandle(handleRef, () => ({
+    openProjectMenu: () => pickerRef.current?.openMenu("project"),
+  }), []);
   const initialFocusRef = useRef(initialFocus);
   const onInitialFocusDoneRef = useRef(onInitialFocusDone);
   onInitialFocusDoneRef.current = onInitialFocusDone;

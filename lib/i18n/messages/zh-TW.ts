@@ -336,6 +336,7 @@ export const zhTWLocale: LocalePlugin = {
     "sidebar.clearSearch": "清除搜尋",
     "sidebar.searchSessions": "搜尋所有對話...",
     "sidebar.toggleSessionSearch": "搜尋對話",
+    "sidebar.shortcutHint": "{label}（{shortcut}）",
     "sidebar.sessionSearching": "搜尋中...",
     "sidebar.sessionSearchEmpty": "找不到相符的對話",
     "sidebar.sessionSearchCount": "{count} 個相符的對話",
