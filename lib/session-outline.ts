@@ -62,7 +62,7 @@ function previewOf(message: AgentMessage): string {
 export function anchorLabel(message: AgentMessage): string | null {
   if (message.role !== "custom") return null;
   if (message.customType === "compaction") return "compaction";
-  if (message.customType === "pi-web:subagent-notification") return "subagent";
+  if (message.customType === "pi-web:subagent-notification" || message.customType === "subagent-notification") return "subagent";
   return null;
 }
 
