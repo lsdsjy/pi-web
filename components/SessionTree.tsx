@@ -657,52 +657,51 @@ const SessionRowView = memo(function SessionRowView({
           {mainContent}
         </a>
       )}
-      {!status.transient && (
-        <span className="session-tree-actions">
-          {quickAction && (context === "archive" ? (
-            <button
-              type="button"
-              className="session-tree-action session-tree-quick-action"
-              aria-label={t("sidebar.restore")}
-              title={t("sidebar.restore")}
-              onClick={(event) => {
-                event.stopPropagation();
-                handlers.current.onRestoreFamily(family);
-              }}
-            >
-              <RestoreIcon size={13} />
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="session-tree-action session-tree-quick-action"
-              aria-label={t("sidebar.archive")}
-              title={t("sidebar.archive")}
-              onClick={(event) => {
-                event.stopPropagation();
-                handlers.current.onArchiveFamily(family);
-              }}
-            >
-              <ArchiveIcon size={13} />
-            </button>
-          ))}
+      {/* A transient row has no file to archive: its menu holds Pin alone. */}
+      <span className="session-tree-actions">
+        {quickAction && !status.transient && (context === "archive" ? (
           <button
             type="button"
-            className={`session-tree-action session-tree-more-action${menuOpen ? " is-active" : ""}`}
-            aria-label={t("sidebar.moreActions")}
-            title={t("sidebar.moreActions")}
-            aria-haspopup="menu"
-            aria-expanded={menuOpen}
+            className="session-tree-action session-tree-quick-action"
+            aria-label={t("sidebar.restore")}
+            title={t("sidebar.restore")}
             onClick={(event) => {
               event.stopPropagation();
-              const button = event.currentTarget;
-              handlers.current.onOpenRowMenu(row, anchorOf(button), button);
+              handlers.current.onRestoreFamily(family);
             }}
           >
-            <MoreIcon size={14} />
+            <RestoreIcon size={13} />
           </button>
-        </span>
-      )}
+        ) : (
+          <button
+            type="button"
+            className="session-tree-action session-tree-quick-action"
+            aria-label={t("sidebar.archive")}
+            title={t("sidebar.archive")}
+            onClick={(event) => {
+              event.stopPropagation();
+              handlers.current.onArchiveFamily(family);
+            }}
+          >
+            <ArchiveIcon size={13} />
+          </button>
+        ))}
+        <button
+          type="button"
+          className={`session-tree-action session-tree-more-action${menuOpen ? " is-active" : ""}`}
+          aria-label={t("sidebar.moreActions")}
+          title={t("sidebar.moreActions")}
+          aria-haspopup="menu"
+          aria-expanded={menuOpen}
+          onClick={(event) => {
+            event.stopPropagation();
+            const button = event.currentTarget;
+            handlers.current.onOpenRowMenu(row, anchorOf(button), button);
+          }}
+        >
+          <MoreIcon size={14} />
+        </button>
+      </span>
     </div>
   );
 });

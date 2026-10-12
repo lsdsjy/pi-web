@@ -243,10 +243,9 @@ test("the selected row is marked and its menu button reports an open menu", () =
   assert.match(html, /class="session-tree-action session-tree-more-action is-active"[^>]*aria-expanded="true"/);
 });
 
-test("a transient row offers no actions at all", () => {
+test("a transient row offers its menu (Pin) but no archive", () => {
   const html = rowMarkup(render({ rows: [sessionRow(session("tmp"), { status: { transient: true } })] }), "session:group:tmp");
-  assert.doesNotMatch(html, /session-tree-actions/);
-  assert.doesNotMatch(html, /More actions/);
+  assert.match(html, /More actions/);
   assert.doesNotMatch(html, /aria-label="Archive"/);
   assert.match(html, /session-tree-title">first tmp</);
   // No file yet, so no link another tab could not load: still a button.

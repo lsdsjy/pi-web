@@ -1,7 +1,7 @@
 /**
  * What a session row's menu offers (and a project group's name entries), as
  * plain data the sidebar turns into labelled items. Pure, so the rules
- * (nothing disk-backed for a transient session, archive disabled while a
+ * (only Pin for a transient session, archive disabled while a
  * family runs) are testable without a DOM. Fork leaves the source untouched
  * (it copies the finished entries of its current branch), so it is offered
  * everywhere: while the family runs and from the archive too. Open in new tab
@@ -33,15 +33,18 @@ export type SessionMenuEntry =
 
 /**
  * A session row's built-in menu. A transient session has no file yet, so it
- * gets none: pin, archive, rename, fork and delete would all act on a missing
- * file, and another tab could not load it.
+ * gets Pin alone: archive, rename, fork and delete would act on a missing
+ * file, and another tab could not load it. A pin is keyed by the session id,
+ * which the file keeps once the first turn writes it.
  * In the archive view, Pin also restores (pin and archive exclude each other).
  */
 export function sessionMenuEntries(
   context: Extract<SidebarRow, { kind: "session" }>["context"],
   status: SidebarFamilyStatus,
 ): SessionMenuEntry[] {
-  if (status.transient) return [];
+  if (status.transient) {
+    return [{ kind: "action", id: context === "pinned" ? "unpin" : "pin", shortcut: "P" }];
+  }
   const openNewTab: SessionMenuEntry = { kind: "action", id: "open-new-tab", shortcut: "T" };
   if (context === "archive") {
     return [

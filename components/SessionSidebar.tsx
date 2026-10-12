@@ -1953,14 +1953,12 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   };
 
   const openRowMenu = useCallback((row: SessionRow, anchor: SidebarMenuAnchor, opener: HTMLElement | null) => {
-    if (row.status.transient) return;
     setMenu({ kind: "row", row, anchor, opener });
   }, []);
 
   // Right-click: an extension listening for the downstream event (a pi-web
   // integration) claims the row first; only an unclaimed event opens the
-  // built-in menu. A transient row has nothing to offer, so the browser's own
-  // menu stays.
+  // built-in menu (a transient row's holds Pin alone).
   const handleContextMenu = useCallback((row: SessionRow, event: ReactMouseEvent) => {
     const session = row.family.root;
     if (session.id === renamingRootId || session.id === confirmDeleteRootId) return;
@@ -1977,7 +1975,6 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       event.stopPropagation();
       return;
     }
-    if (session.transient) return;
     event.preventDefault();
     const rowElement = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
     // The keyboard's context-menu key reports no pointer position.
