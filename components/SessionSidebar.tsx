@@ -2768,8 +2768,10 @@ function SessionItem({
             </button>
           )}
 
-          {/* Action buttons — shown on hover */}
-          {hovered && !session.transient && (
+          {/* Action buttons — shown on hover. Pins are keyed by session id, so
+              a transient session can be pinned before its JSONL exists;
+              archiving moves the file and waits until it is written. */}
+          {hovered && (onTogglePinned || !session.transient) && (
             <div
               style={{
                 position: "absolute",
@@ -2814,31 +2816,33 @@ function SessionItem({
                   <PinIcon filled={isPinned} />
                 </button>
               )}
-              <button
-                onClick={handleDeleteClick}
-                title={t("sidebar.archiveWithShiftClick")}
-                aria-label={t("sidebar.archive")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 32, height: 32, padding: 0,
-                  background: "var(--bg-hover)", border: "1px solid var(--border)",
-                  borderRadius: 7, color: "var(--text-muted)",
-                  cursor: "pointer", flexShrink: 0,
-                  transition: "background 0.12s, color 0.12s, border-color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-selected)";
-                  e.currentTarget.style.color = "var(--accent)";
-                  e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                  e.currentTarget.style.borderColor = "var(--border)";
-                }}
-              >
-                <ArchiveIcon size={14} />
-              </button>
+              {!session.transient && (
+                <button
+                  onClick={handleDeleteClick}
+                  title={t("sidebar.archiveWithShiftClick")}
+                  aria-label={t("sidebar.archive")}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, padding: 0,
+                    background: "var(--bg-hover)", border: "1px solid var(--border)",
+                    borderRadius: 7, color: "var(--text-muted)",
+                    cursor: "pointer", flexShrink: 0,
+                    transition: "background 0.12s, color 0.12s, border-color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "var(--bg-selected)";
+                    e.currentTarget.style.color = "var(--accent)";
+                    e.currentTarget.style.borderColor = "rgba(37,99,235,0.35)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--text-muted)";
+                    e.currentTarget.style.borderColor = "var(--border)";
+                  }}
+                >
+                  <ArchiveIcon size={14} />
+                </button>
+              )}
             </div>
           )}
         </>

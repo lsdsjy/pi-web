@@ -134,7 +134,11 @@ test("lifecycle refreshes bypass the cache while cross-window polling reuses it"
 
 test("does not expose disk-backed actions for transient sessions", () => {
   assert.match(sessionItemSource, /if \(session\.transient\) return;/);
-  assert.match(sessionItemSource, /\{hovered && !session\.transient && \(/);
+  assert.match(sessionItemSource, /\{!session\.transient && \(\s*<button\s+onClick=\{handleDeleteClick\}/);
+});
+
+test("lets transient sessions be pinned before their first turn is written", () => {
+  assert.match(sessionItemSource, /\{hovered && \(onTogglePinned \|\| !session\.transient\) && \(/);
 });
 
 test("hides subagent rows and aggregates their state into the main session row", () => {
