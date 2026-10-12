@@ -167,9 +167,9 @@ function readDockBadge() {
  */
 const INSET_TITLEBAR = process.platform === "darwin" && process.env.PI_WEB_NATIVE_FRAME !== "1";
 // Standard macOS traffic light metrics: three 12pt buttons with 8pt gaps.
-// y centers the lights on the sidebar's first control row, which sits at
-// y 12..44 in the 260px sidebar.
-const TRAFFIC_LIGHT_POSITION = { x: 16, y: 22 };
+// y centers the lights on the sidebar's header row (.sidebar-header), which
+// sits at y 0..36, as does the center column's toolbar row.
+const TRAFFIC_LIGHT_POSITION = { x: 16, y: 12 };
 const TRAFFIC_LIGHT_SIZE = { width: 52, height: 12 };
 // Left padding the app's top rows need to clear the lights, plus a 6px gap.
 const LIGHT_INSET = TRAFFIC_LIGHT_POSITION.x + TRAFFIC_LIGHT_SIZE.width + 6;
@@ -187,24 +187,17 @@ function trafficLightBox() {
  * Preferred layout: no reserved strip. The lights sit inside the app's own
  * header rows, and those rows are indented so nothing lands under them.
  *
- * - Sidebar open: the brand row ("Pi Web" + New + search) is indented.
+ * - Sidebar open: the sidebar's header row (.sidebar-header: "Pi Web", New,
+ *   search, ...) is indented. Its padding shrinks its content box, so the
+ *   header's own fit (useHeaderFit) drops labels that no longer fit.
  * - Sidebar collapsed: the brand row is gone, and the center column's toolbar
  *   toggle button moves to the window's left edge, so that row is indented
  *   instead. `sidebar-closed + div` is the center column: the resize handle
  *   between them is only rendered while the sidebar is open.
  */
 const INLINE_TITLEBAR_CSS = `
-  #session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) {
+  #session-sidebar .sidebar-header {
     padding-left: ${LIGHT_INSET}px !important;
-  }
-  /* The inset leaves no room for the "New" label next to the other header
-     buttons, so it collapses to its + icon (the tooltip keeps the name). */
-  #session-sidebar .sidebar-new-label {
-    display: none !important;
-  }
-  #session-sidebar .sidebar-new-button {
-    width: 32px !important;
-    padding: 0 !important;
   }
   #session-sidebar.sidebar-closed + div > div:first-child > div:first-child {
     padding-left: ${LIGHT_INSET}px !important;
@@ -225,17 +218,10 @@ const INLINE_TITLEBAR_CSS = `
  * sidebar resize handle (a conditional sibling) is rendered.
  */
 const DRAG_REGION_CSS = `
-  #session-sidebar > div:nth-child(1) > div:nth-child(1),
-  #session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1),
+  #session-sidebar .sidebar-header,
   div:has(> div > .chat-content) > div:first-child,
   #file-panel > div:first-child {
     -webkit-app-region: drag;
-  }
-
-  /* Everything below the open header row (project picker, dropdown) stays
-     interactive. */
-  #session-sidebar > div:nth-child(1) > div:nth-child(1) > *:not(:first-child) {
-    -webkit-app-region: no-drag;
   }
 
   button, input, select, textarea, a,
@@ -244,7 +230,7 @@ const DRAG_REGION_CSS = `
     -webkit-app-region: no-drag;
   }
 
-  #session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > button:first-child {
+  #session-sidebar .sidebar-header > .sidebar-brand {
     -webkit-app-region: drag;
   }
 `;
@@ -350,12 +336,13 @@ const STRIP_TITLEBAR_CSS = `
   }
 `;
 
-// Confirms the sidebar brand row has the shape INLINE_TITLEBAR_CSS assumes:
-// a short button (the "Pi Web" logo) as the row's first child.
+// Confirms the sidebar header has the shape INLINE_TITLEBAR_CSS assumes: a
+// short button (the "Pi Web" logo) as the header row's first child. A closed
+// sidebar still renders it, hidden, so the probe only checks the markup.
 const BRAND_ROW_PROBE = `(() => {
-  const row = document.querySelector("#session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)");
-  const brand = row && row.firstElementChild;
-  if (!brand || brand.tagName !== "BUTTON") return false;
+  const brand = document.querySelector("#session-sidebar .sidebar-header > .sidebar-brand:first-child");
+  if (!brand) return false;
+  if (document.getElementById("session-sidebar").classList.contains("sidebar-closed")) return true;
   const r = brand.getBoundingClientRect();
   return r.width > 30 && r.width < 90 && r.height > 16 && r.height < 36;
 })()`;
@@ -684,8 +671,7 @@ function createWindow() {
           overlapping: controls,
           topBand: band,
           dragRegions: [
-            "#session-sidebar > div:nth-child(1) > div:nth-child(1)",
-            "#session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1)",
+            "#session-sidebar .sidebar-header",
             "div:has(> div > .chat-content) > div:first-child",
             "#file-panel > div:first-child",
           ].map((sel) => {
@@ -697,7 +683,7 @@ function createWindow() {
             return b ? getComputedStyle(b).getPropertyValue("-webkit-app-region").trim() || "none" : "MISSING";
           })(),
           brandRegion: (() => {
-            const el = document.querySelector("#session-sidebar > div:nth-child(1) > div:nth-child(1) > div:nth-child(1) > button:first-child");
+            const el = document.querySelector("#session-sidebar .sidebar-header > .sidebar-brand");
             return el ? getComputedStyle(el).getPropertyValue("-webkit-app-region").trim() || "none" : "MISSING";
           })(),
         };
