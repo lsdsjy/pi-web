@@ -2658,9 +2658,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useLayoutEffect(() => {
     if (messages.length > 0) {
       if (pendingScrollToUserRef.current) {
-        pendingScrollToUserRef.current = false;
         initialScrollDoneRef.current = true;
-        scrollUserMsgToTop();
+        if (lastUserMsgRef.current) {
+          pendingScrollToUserRef.current = false;
+          scrollUserMsgToTop();
+        }
       } else if (!initialScrollDoneRef.current) {
         initialScrollDoneRef.current = true;
         scrollToBottom("instant");

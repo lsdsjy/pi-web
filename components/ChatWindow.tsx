@@ -657,6 +657,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     onSearchTargetHandled?.(pendingSearchScroll);
   }, [pendingSearchScroll, searchTarget, searchMessage, scrollContainerRef, scrollToMessage, onSearchTargetHandled]);
 
+  // Keep the rendered window at least as large as what's loaded, so prepended
+  // (older) pages stay visible instead of being sliced off the top.
+  const effectiveVisibleCount = Math.max(visibleCount, messages.length);
+
   // IntersectionObserver on the sentinel div at the top of the message list.
   // When it becomes visible, load the next page of older messages.
   useEffect(() => {
@@ -695,21 +699,19 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     return () => observer.disconnect();
   }, [sentinel, visibleCount, historyCursor, hasEarlierMessages, session, loadOlderPage, sessionIdRef, scrollContainerRef]);
 
-  // Keep the rendered window at least as large as what's loaded, so prepended
-  // (older) pages stay visible instead of being sliced off the top.
-  useEffect(() => {
+  useLayoutEffect(() => {
     setVisibleCount((current) => Math.max(current, messages.length));
   }, [messages.length]);
 
   // After visibleCount increases (more messages prepended), restore the
   // scroll position so the viewport doesn't jump.
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (prevScrollDistanceRef.current == null) return;
     const container = scrollContainerRef.current;
     if (!container) return;
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
-  }, [visibleCount, scrollContainerRef]);
+  }, [effectiveVisibleCount, scrollContainerRef]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -968,16 +970,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       );
 
       const isInitialMeasurement = !promptAnchorAdjustmentDoneRef.current;
-      const needsInitialAdjustment = isInitialMeasurement
-        && nextPromptAnchorSpacerHeight > 0;
-      if (isInitialMeasurement) promptAnchorAdjustmentDoneRef.current = true;
+      if (isInitialMeasurement && nextPromptAnchorSpacerHeight > 0) {
+        promptAnchorAdjustmentDoneRef.current = true;
+      }
       if (nextPromptAnchorSpacerHeight === promptAnchorSpacerHeightRef.current) return;
 
       promptAnchorSpacerHeightRef.current = nextPromptAnchorSpacerHeight;
       spacer.style.height = nextPromptAnchorSpacerHeight > 0
         ? `${nextPromptAnchorSpacerHeight}px`
         : "";
-      if (needsInitialAdjustment) scrollUserMsgToTop();
+      if (isInitialMeasurement && nextPromptAnchorSpacerHeight > 0) scrollUserMsgToTop();
     };
 
     promptAnchorUpdateRef.current = updatePromptAnchorSpacer;
@@ -1368,7 +1370,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 }
                 idx = endIdx;
               }
-              const { startIndex } = getVisibleRenderWindow(rendered.length, visibleCount);
+              const { startIndex } = getVisibleRenderWindow(rendered.length, effectiveVisibleCount);
               const hasMore = startIndex > 0 || hasEarlierMessages;
               return (
                 <>
